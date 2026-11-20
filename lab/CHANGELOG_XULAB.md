@@ -7,6 +7,64 @@ commit `8c1a858fdc1bfc94c60846ff11a0d01c9aa44136` (`v1.0.4-4-g8c1a858`,
 The upstream license requires that modifications be marked. This file is that
 record.
 
+## 2026-11-20 (Phase 3a) - GPU initialisation fix after job 1014429
+
+The first real H200 job failed in JAX GPU initialisation. From the job's own
+logs: an H200 NVL visible to `nvidia-smi`, `CUDA_VISIBLE_DEVICES=0`, the correct
+conda environment, imports resolving to the lab source copy, AlphaFold
+parameters found, preflight READY, JAX 0.11.2 with the CUDA 12 plugin - and
+`cuInit(0) failed: CUDA_ERROR_NO_DEVICE`, after which JAX fell back to the CPU
+and the launcher's gate stopped the campaign (the gate behaved correctly).
+
+`nvidia-smi` is a separate binary needing only `/dev/nvidiactl`, so it can
+succeed where CUDA cannot initialise. The causes that produce exactly this split
+are a stub `libcuda` on `LD_LIBRARY_PATH`, a missing `/dev/nvidia-uvm` in the
+step's device cgroup, a `CUDA_VISIBLE_DEVICES` naming a device the step was not
+granted, GRES bound to the step rather than the batch step, and
+`JAX_PLATFORMS=cpu`. Rather than guess, the launcher now gathers the evidence
+inside the real allocation and repairs what it can.
+
+### Added
+
+| File | What it does |
+| --- | --- |
+| `lab/scripts/gpu_probe.py` | Loads `libcuda.so.1`, reports where it came from and whether a stub is ahead of it, calls `cuDriverGetVersion`, `cuInit`, `cuDeviceGetCount` and names each device, then imports JAX and reports the backend and devices. Prints the ordered causes when `cuInit` returns `CUDA_ERROR_NO_DEVICE`. Exit 0 usable, 2 no libcuda, 3 driver init failed, 4 no JAX GPU, 5 no JAX; `--json` for machine reading. |
+| `lab/scripts/gpu_diagnostics.sh` | The shell half: SLURM GRES and binding variables, `scontrol` TRES, `/dev/nvidia*` nodes with an explicit check for `/dev/nvidia-uvm` and `nvidia-uvm-tools`, `/proc/driver/nvidia/version`, loaded `nvidia*` modules, `nvidia-smi -L` and driver version, `ldconfig` and `LD_LIBRARY_PATH` resolution of `libcuda` with stub flagging, then the probe. Runs inside the campaign job; also usable under `salloc`. |
+
+### Changed
+
+| File | Change |
+| --- | --- |
+| `lab/slurm/run_bindcraft_h200.slurm` | (1) strips stub `libcuda` directories from `LD_LIBRARY_PATH` (`XULAB_KEEP_LD_STUBS=1` disables); (2) reconciles `CUDA_VISIBLE_DEVICES` with `SLURM_STEP_GPUS`/`SLURM_JOB_GPUS`, SLURM winning, and warns on an empty value; (3) unsets `JAX_PLATFORMS`/`JAX_PLATFORM_NAME` when they force CPU; (4) runs the diagnostics in the batch step and, if that fails, once more as an `srun` step, so the two views can be compared in one job; (5) attempts the import-origin + JAX-GPU gate as an `srun` step first and falls back to the batch step, then runs the campaign in whichever mode passed (`XULAB_SRUN`, `XULAB_SRUN_FLAGS`); (6) the failure message lists the ordered causes and the interactive command to re-run the diagnostics. The hard refusal to design on CPU is unchanged. |
+| `lab/scripts/hpc_preflight.sh` | new blocking check 7: a stub `libcuda` on `LD_LIBRARY_PATH`, and `JAX_PLATFORMS`/`JAX_PLATFORM_NAME` forcing CPU. Both are visible from a login node, before a GPU is requested. |
+| `lab/scripts/validate_outputs.py` | recognises `cuInit` failures, `CUDA_ERROR_NO_DEVICE`, `Unable to initialize backend`, and the probe's own verdict lines; reports a `CUDA driver initialisation` check and refuses Level A when the driver failed, stating that an allocated card and an `nvidia-smi` listing mean nothing in that case. |
+| `README.md`, `README_XULAB.md`, `lab/README.md` | the diagnostics feature, and a troubleshooting section that documents the failure, its causes in discriminating order, and the log lines to read. |
+
+### Not changed
+
+No package was installed, no CUDA or JAX version changed, no AI algorithm
+touched, no repository rebuild, and no notebook functionality altered. Source
+stays at `/home/ypan/BindCraft2/BindCraft2_deploy`, outputs under
+`/project/yli4/ypan/bindcraft/`.
+
+### Local tests
+
+39 assertions: `bash -n` on all four shell scripts; the probe's behaviour with
+no CUDA present (exit 2, correct verdict, no GPU claimed) and with a simulated
+allocation environment including `--json`; the launcher's stub-stripping,
+`CUDA_VISIBLE_DEVICES` reconciliation (stale, matching, step-over-job, empty)
+and `JAX_PLATFORMS` handling, exercised by sourcing those blocks with fixture
+values; the launcher's structure (diagnostics, srun-first gate, batch fallback,
+campaign in the passing mode, no `pip install`, unchanged paths); preflight
+READY on a clean path and BLOCKED on a stub libcuda or `JAX_PLATFORMS=cpu`; and
+the validator on both a reproduction of the 1014429 log (Level A FAIL, driver
+check named) and a healthy log (Level A PASS). The embedded gate script was
+parsed as Python to confirm the shell quoting is intact.
+
+Still not verified: the fix itself against the cluster. Whether job 1014429's
+cause was the stub library, the uvm node, the inherited variable or the batch
+step will be stated by the next job's own diagnostics, not guessed here.
+
 ## 2026-11-20 (Phase 2c) - final HPC paths
 
 The deployment location was fixed by the user: the source tree and the notebook

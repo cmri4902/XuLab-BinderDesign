@@ -47,6 +47,7 @@ quota.
 | **Design configuration** | Shipped targets or your own PDB/mmCIF/FASTA, with chains, hotspots and coldspots; 10 binder modalities; property presets; length, oligomer, design and trajectory budgets. Written to a settings file validated against the upstream setting names. |
 | **Result reading** | Ranked designs, scored candidates with the filters that rejected them, and attempts with their termination stage - plus interface and confidence readings per accepted design. |
 | **Output audit** | `lab/scripts/validate_outputs.py` - read-only PASS / FAIL / BLOCKED / NOT TESTED report. Compute-smoke acceptance requires explicit JAX GPU evidence from the job log, not merely an allocated card. |
+| **GPU diagnostics in the allocation** | `lab/scripts/gpu_diagnostics.sh` + `lab/scripts/gpu_probe.py` - SLURM bindings, `/dev/nvidia*` nodes, driver version, `libcuda` resolution (including stub detection), `cuInit` and the JAX backend, printed by every campaign job. No separate GPU test job. |
 | **Login-node preflight** | `lab/scripts/hpc_preflight.sh` - project directories, interpreter, import origin, module and checkpoint inventory, AlphaFold parameter completeness, CRLF check. Blocking failures exit nonzero. |
 | **Reproducible deployment** | `lab/scripts/make_release.sh` - transfer archive built from the Git object store with a `BUILD_REVISION.txt` provenance record and LF line endings. |
 

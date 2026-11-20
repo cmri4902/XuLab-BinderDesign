@@ -455,11 +455,51 @@ a software failure. Read, in order:
 An accepted design means the configured computational checks passed. It is
 **not** evidence of binding, affinity, specificity, stability or function.
 
+### GPU initialisation: what stopped job 1014429
+
+The first real H200 job failed with `cuInit(0) failed: CUDA_ERROR_NO_DEVICE`
+even though `nvidia-smi` listed an H200 NVL, `CUDA_VISIBLE_DEVICES=0`, the conda
+environment and source imports were correct, the AlphaFold parameters were found
+and preflight reported READY. JAX fell back to the CPU and the launcher's gate
+stopped the campaign, which is the behaviour it was built for.
+
+That exact split - `nvidia-smi` works, `cuInit` does not - has a short list of
+causes, because `nvidia-smi` is a separate binary that only needs
+`/dev/nvidiactl`, while CUDA needs a real driver library, the `nvidia-uvm`
+device and a device this process was actually granted:
+
+| Cause | Evidence in the log | What the launcher now does |
+| --- | --- | --- |
+| A **stub `libcuda`** on `LD_LIBRARY_PATH` (the CUDA toolkit's link-time placeholder, often inherited from a conda prefix). It loads, then answers `cuInit` with `CUDA_ERROR_NO_DEVICE`. | `STUB .../stubs/libcuda.so.1` from the diagnostics, or `stub libcuda ahead of the real driver` from the probe | strips those directories from `LD_LIBRARY_PATH` before anything imports JAX (`XULAB_KEEP_LD_STUBS=1` disables this), and `hpc_preflight.sh` now blocks on it from the login node |
+| **`/dev/nvidia-uvm` missing** from the step's device cgroup | `MISSING /dev/nvidia-uvm` | reported explicitly; it needs a site fix (the module must be loaded on the node), and the diagnostics say so rather than letting the campaign fail obscurely |
+| **`CUDA_VISIBLE_DEVICES` naming a device this step was not given**, typically carried in by `--export=ALL` from the submitting shell (for example a Jupyter node's T4) | `CUDA_VISIBLE_DEVICES=... did not match the allocation` | reconciles it against `SLURM_STEP_GPUS` / `SLURM_JOB_GPUS`, with SLURM's view winning |
+| **The work running in the batch step** on a cluster that binds the GRES to the step | batch-step diagnostics fail, srun-step diagnostics pass | runs the gate as an `srun` step first and the campaign in whichever mode passed the gate (`XULAB_SRUN=auto|always|never`, `XULAB_SRUN_FLAGS`) |
+| **`JAX_PLATFORMS=cpu`** forcing CPU execution | `env JAX_PLATFORMS=cpu` | unset for the job, and blocked by preflight |
+
+Every campaign job now prints this report before designing anything:
+
+```bash
+# inside the job, automatically; or by hand in an interactive allocation
+salloc --partition=gpu --gres=gpu:h200:1 -c 8 --mem=16G -t 00:20:00
+bash lab/scripts/gpu_diagnostics.sh      # exit 0 usable, 2 no libcuda, 3 cuInit failed,
+                                         #      4 no JAX GPU, 5 no JAX
+```
+
+Read the log in this order: `xulab-diag: === slurm allocation ===` (what the
+step was given), `=== device nodes and driver module ===` (`MISSING` lines),
+`=== cuda driver library resolution ===` (`STUB` lines), then
+`xulab-gpu: verdict`. `validate_outputs.py` reads the same lines and refuses
+Level A when the driver failed, whatever `nvidia-smi` reported.
+
+Nothing was reinstalled, upgraded or rebuilt to produce this fix: no CUDA, JAX
+or dependency version changed, and no AI algorithm was touched.
+
 ### Common execution failures
 
 | Symptom in the log | Cause | Fix |
 | --- | --- | --- |
-| `ERROR: no JAX GPU in this allocation` | No GPU requested, or `CUDA_VISIBLE_DEVICES` empty | Submit through the lab script and keep `--gres=gpu:h200:1`; check `sacct -j <id> --format=ReqTRES%40`. |
+| `ERROR: no JAX GPU in this allocation` | No GPU requested, `CUDA_VISIBLE_DEVICES` empty, or the CUDA driver failed to initialise | Read the diagnostics block above it in the log; see [GPU initialisation](#gpu-initialisation-what-stopped-job-1014429). Check `sacct -j <id> --format=ReqTRES%40`. |
+| `cuInit(0) failed: CUDA_ERROR_NO_DEVICE` while `nvidia-smi` works | stub `libcuda`, missing `/dev/nvidia-uvm`, a `CUDA_VISIBLE_DEVICES` the step was not given, or batch-step GRES binding | the launcher repairs the first and third, runs the gate under `srun` for the fourth, and names the second. Full order of causes in the section above. |
 | `ERROR: imported bindcraft from ...` outside the lab copy | Editable install of the older source wins | See §4. |
 | `AlphaFold parameters not found` | `BINDCRAFT_AF2_PARAMS` unset or wrong | Locate the existing copy (`find $HOME /project -maxdepth 6 -name 'params_model_1_multimer_v3.npz'`) and export the **directory**. Do not download. |
 | `RESOURCE_EXHAUSTED` / out of memory | VRAM or host RAM too small for the target | Keep `workers_per_gpu: 1`; raise `--mem` above 64G; shorten `binder_lengths`. |

@@ -81,6 +81,13 @@ SUPPORTING_GPU_EVIDENCE = (
 
 CPU_WARNING = re.compile(r"no GPU visible|leaves AlphaFold on the CPU|"
                          r"\bbackend\s*=\s*cpu\b|refusing to design on CPU", re.I)
+# A driver that will not initialise is the job-1014429 failure: nvidia-smi sees
+# the card, cuInit does not, and JAX quietly falls back to the CPU. It is called
+# out separately because the supporting GPU evidence all looks healthy.
+DRIVER_FAILURE = re.compile(
+    r"cuInit\(0\)[^\n]*fail|CUDA_ERROR_NO_DEVICE|CUDA_ERROR_NO_CUDA_CAPABLE_DEVICE|"
+    r"no CUDA-capable device is detected|Unable to initialize backend ['\"]?(cuda|gpu|rocm)|"
+    r"xulab-gpu: verdict (NO LIBCUDA|DRIVER INIT FAILED|NO JAX GPU|NO JAX)", re.I)
 # "campaign exit status 0" from the lab launcher, and generic exit reports.
 EXIT_STATUS = re.compile(r"campaign exit status\s+(\d+)", re.I)
 GENERIC_EXIT = re.compile(r"\bexit(?:ed with|\s+status|\s+code)[:= ]\s*(\d+)", re.I)
@@ -546,7 +553,7 @@ def check_worker_logs(campaign: Path, checks: list) -> None:
 def check_slurm_logs(patterns, checks: list) -> dict:
     """Scan the supplied logs. Returns the evidence dictionary used for Level A."""
     evidence = {"jax": {}, "supporting": {}, "exit_codes": [], "terminations": [],
-                "paths": [], "cpu_warned": False}
+                "paths": [], "cpu_warned": False, "driver_failures": []}
     paths = []
     for pattern in patterns:
         expanded = [Path(match) for match in sorted(glob.glob(os.path.expanduser(pattern)))]
@@ -578,6 +585,8 @@ def check_slurm_logs(patterns, checks: list) -> dict:
                     evidence["supporting"].setdefault(name, f"{where}: {excerpt}")
             if CPU_WARNING.search(line):
                 evidence["cpu_warned"] = True
+            if DRIVER_FAILURE.search(line):
+                evidence["driver_failures"].append(f"{where}: {excerpt}")
             found_exit = EXIT_STATUS.search(line) or GENERIC_EXIT.search(line)
             if found_exit:
                 evidence["exit_codes"].append((int(found_exit.group(1)), where, excerpt))
@@ -642,6 +651,14 @@ def check_slurm_logs(patterns, checks: list) -> dict:
         checks.append(Check("CPU fallback warning", FAIL,
                             "a log line reports no visible GPU or CPU execution; such a run "
                             "must not be scored as an H200 campaign", sources))
+    if evidence["driver_failures"]:
+        checks.append(Check("CUDA driver initialisation", FAIL,
+                            "the CUDA driver or the JAX GPU backend failed to initialise, so a "
+                            "card being allocated and listed by nvidia-smi means nothing here: "
+                            + "; ".join(evidence["driver_failures"][:5])
+                            + ". lab/scripts/gpu_diagnostics.sh in the allocation names the "
+                              "cause (stub libcuda, missing /dev/nvidia-uvm, or a "
+                              "CUDA_VISIBLE_DEVICES the step was not given)", sources))
     return evidence
 
 
@@ -656,7 +673,11 @@ def verdicts(counts: dict, evidence: dict):
     records = (f"{trajectories} trajectory record(s), {candidates} candidate record(s)")
     nonzero = [item for item in evidence["exit_codes"] if item[0] != 0]
 
-    if evidence["cpu_warned"]:
+    if evidence["driver_failures"]:
+        level_a = (FAIL, "the CUDA driver or the JAX GPU backend failed to initialise "
+                         f"({evidence['driver_failures'][0]}); the campaign cannot have run on "
+                         "a GPU regardless of what nvidia-smi reported")
+    elif evidence["cpu_warned"]:
         level_a = (FAIL, "a log reports CPU execution or no visible GPU")
     elif not evidence["paths"]:
         level_a = (NOT_TESTED, "no SLURM log was supplied, so neither the JAX GPU backend nor "

@@ -9,7 +9,8 @@
 #   4. every module and ProteinMPNN checkpoint is present       BLOCKING
 #   5. the existing AlphaFold parameters can be located         BLOCKING
 #   6. Linux-executed scripts have LF line endings              BLOCKING
-#   7. free space, nvidia-smi, quota readings                   WARNING only
+#   7. no stub libcuda / forced-CPU JAX in the environment    BLOCKING
+#   8. free space, nvidia-smi, quota readings                   WARNING only
 #
 # Run from the lab source tree on the login node:
 #   cd /home/ypan/BindCraft2/BindCraft2_deploy
@@ -218,8 +219,49 @@ for script in "${LINUX_SCRIPTS[@]}"; do
 done
 echo
 
-# --- 7. informational (WARNING only) ---------------------------------------
-echo "[7] informational"
+# --- 7. CUDA driver library resolution (BLOCKING) --------------------------
+# A stub libcuda - the CUDA toolkit's link-time placeholder, usually under a
+# .../stubs directory and often inherited from a conda prefix - loads happily and
+# then answers cuInit with CUDA_ERROR_NO_DEVICE. That is what stopped job
+# 1014429, and it is visible from a login node, before a GPU is ever requested.
+echo "[7] CUDA driver library resolution"
+stub_found=""
+if [[ -n ${LD_LIBRARY_PATH:-} ]]; then
+  IFS=':' read -r -a library_dirs <<< "${LD_LIBRARY_PATH}"
+  for directory in "${library_dirs[@]}"; do
+    [[ -z ${directory} ]] && continue
+    for name in libcuda.so.1 libcuda.so; do
+      if [[ -e "${directory}/${name}" ]]; then
+        if [[ ${directory} == *"/stubs"* ]]; then
+          stub_found="${stub_found} ${directory}/${name}"
+        else
+          pass "driver library on LD_LIBRARY_PATH: ${directory}/${name}"
+        fi
+      fi
+    done
+  done
+fi
+if [[ -n ${stub_found} ]]; then
+  fail "stub libcuda on LD_LIBRARY_PATH:${stub_found}"
+  note "a stub libcuda answers cuInit with CUDA_ERROR_NO_DEVICE, so a job would see"
+  note "no GPU even though nvidia-smi works. Remove that directory from"
+  note "LD_LIBRARY_PATH before submitting; the launcher also strips it, and"
+  note "XULAB_KEEP_LD_STUBS=1 disables that removal."
+else
+  pass "no stub libcuda ahead of the real driver on LD_LIBRARY_PATH"
+fi
+for forced in JAX_PLATFORMS JAX_PLATFORM_NAME; do
+  if [[ ${!forced-} == *cpu* ]]; then
+    fail "${forced}=${!forced} would force JAX onto the CPU in every job"
+    note "unset it, or let the launcher unset it for the job"
+  fi
+done
+note "GPU reachability itself is tested inside the allocation by"
+note "lab/scripts/gpu_diagnostics.sh, which the launcher runs for every campaign"
+echo
+
+# --- 8. informational (WARNING only) ---------------------------------------
+echo "[8] informational"
 if command -v nvidia-smi > /dev/null 2>&1; then
   note "nvidia-smi on this node: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>&1 | paste -sd', ' -)"
   note "this is the LOGIN/interactive node, not the batch H200 allocation"
