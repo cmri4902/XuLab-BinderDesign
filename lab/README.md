@@ -1,8 +1,9 @@
 # `lab/` - Xu Lab additions
 
-Everything in this directory was written by the Xu Lab. Nothing outside it has
-been modified: the upstream tree at commit `8c1a858` is byte-identical to
-`origin/main` (`git status --short` shows only additions under `lab/`).
+Everything in this directory was written by the Xu Lab. Upstream file *contents*
+at commit `8c1a858` are untouched; outside this directory the repository adds
+`.gitattributes`, `README_XULAB.md` and a lab `README.md`, and renames the
+upstream `README.md` to `README_UPSTREAM.md` (same Git blob).
 
 | Path | Status | What it is |
 | --- | --- | --- |

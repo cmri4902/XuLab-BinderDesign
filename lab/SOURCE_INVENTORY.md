@@ -35,7 +35,7 @@ specification. All upstream refs, tags and history are present: `git log`,
 | `examples/` | 28 | example campaign settings files, incl. pdl1.json (unmodified) |
 | `scaffolds/` | 4 | binder scaffold inputs |
 | `settings/` | 37 | core/modality/property/target presets and target structures |
-| root files | 9 | CLI, notebook, slurm template, install.sh, packaging, license, README |
+| root files | 9 | CLI, notebook, slurm template, install.sh, packaging, license, README (the upstream `README.md` is now `README_UPSTREAM.md`, same blob) |
 
 ## Critical upstream components confirmed present
 

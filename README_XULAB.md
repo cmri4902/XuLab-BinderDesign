@@ -4,15 +4,18 @@
 > contains a copy of BindCraft2, Copyright (c) 2026 Martin Pacesa, University of
 > Zurich, and the BindCraft2 contributors, distributed under the BindCraft2
 > Source-Available License (Hosting-Restricted); see [`LICENSE`](LICENSE),
-> preserved verbatim. The copy is taken from upstream commit `8c1a858` with
-> **no upstream file modified or deleted**. The Xu Lab changes are additions
-> only - `lab/`, `.gitattributes` and this file - and every one of them is
-> itemised in [`lab/CHANGELOG_XULAB.md`](lab/CHANGELOG_XULAB.md). The software
+> preserved verbatim. The copy is taken from upstream commit `8c1a858`.
+> **No upstream file has been edited or deleted.** The Xu Lab changes are
+> additions - `lab/`, `.gitattributes`, this file and the root `README.md` - plus
+> one rename: the upstream `README.md` is preserved unchanged as
+> [`README_UPSTREAM.md`](README_UPSTREAM.md) so the repository homepage can carry
+> the lab's own README. Every change is itemised in
+> [`lab/CHANGELOG_XULAB.md`](lab/CHANGELOG_XULAB.md). The software
 > is not offered to third parties as a hosted service, and the name
 > "BindCraft2" is not used to market any service or derivative.
 
 Internal Xu Lab source copy of [PacesaLab/BindCraft2](https://github.com/PacesaLab/BindCraft2),
-prepared for H200 execution through SLURM. Upstream `README.md`,
+prepared for H200 execution through SLURM. Upstream `README_UPSTREAM.md`,
 `docs/source/*` and `LICENSE` remain the authority on the software itself; this
 file documents only what the Xu Lab added and how to run it here.
 
@@ -31,7 +34,7 @@ binder has been produced.** See [Status](#status) for the per-item breakdown.
 | Commit SHA | `8c1a858fdc1bfc94c60846ff11a0d01c9aa44136` |
 | `git describe --tags` | `v1.0.4-4-g8c1a858` |
 | `pyproject.toml` version | 1.0.4 |
-| Tracked upstream files | 186, unmodified |
+| Tracked upstream files | 186, contents unmodified (`README.md` renamed to `README_UPSTREAM.md`, same blob) |
 | Fetched | 2026-11-20 |
 
 Full component inventory: [`lab/SOURCE_INVENTORY.md`](lab/SOURCE_INVENTORY.md).
@@ -50,7 +53,10 @@ structures), `scaffolds/`, the 27 `examples/*.json` campaigns, `docs/`,
 
 ### What the Xu Lab changed
 
-No upstream file was modified or deleted. Additions only:
+No upstream file was edited or deleted. One upstream file was renamed with its
+content untouched (`README.md` -> `README_UPSTREAM.md`, identical Git blob), so
+that the repository homepage shows the lab's README. Everything else is an
+addition:
 
 ```
 .gitattributes                           LF enforcement for every Linux-executed file
@@ -63,6 +69,8 @@ lab/notebooks/xulab_bindcraft_h200.ipynb Jupyter interface for the HPC (Phase 2)
 lab/notebooks/xulab_hpc.py               the notebook's logic, importable and testable
 lab/README.md  lab/SOURCE_INVENTORY.md  lab/CHANGELOG_XULAB.md  lab/notebooks/README.md
 README_XULAB.md                          this file
+README.md                                Xu Lab platform README (homepage)
+README_UPSTREAM.md                       the upstream README, renamed, content unchanged
 ```
 
 ---
@@ -466,7 +474,7 @@ drops its row when the campaign closes - do it deliberately, never as cleanup.
 | --- | --- |
 | Complete upstream clone at `C:\XuLab\BindCraft2`, history and tags | **DONE** (186 tracked files, commit `8c1a858`) |
 | Upstream commit SHA and source inventory | **DONE** (`lab/SOURCE_INVENTORY.md`) |
-| All upstream modalities, presets, scaffolds, notebook, checkpoints preserved | **DONE** (no upstream file modified or deleted) |
+| All upstream modalities, presets, scaffolds, notebook, checkpoints preserved | **DONE** (no upstream file edited or deleted; `README.md` renamed to `README_UPSTREAM.md`, same blob) |
 | `lab/slurm/run_bindcraft_h200.slurm` | **PREPARED**, NOT TESTED (never submitted) |
 | `lab/configs/pdl1_smoke.json` | **PREPARED**, NOT RUN (keys checked against `bindcraft/settings.py`, not executed) |
 | `lab/scripts/validate_outputs.py` | **PREPARED**; syntax-checked and exercised on synthetic fixtures outside the repository, including negative fixtures (allocation-only GPU evidence, nonzero exit, missing structure per candidate); never run against a real campaign |

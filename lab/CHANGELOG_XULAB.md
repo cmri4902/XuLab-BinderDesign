@@ -7,6 +7,34 @@ commit `8c1a858fdc1bfc94c60846ff11a0d01c9aa44136` (`v1.0.4-4-g8c1a858`,
 The upstream license requires that modifications be marked. This file is that
 record.
 
+## 2026-11-20 (Phase 2b) - repository homepage
+
+The GitHub homepage renders the root `README.md`, which was upstream's project
+page: header image, installation instructions and upstream-specific guidance
+that do not describe this deployment.
+
+### Changed
+
+| Path | Change |
+| --- | --- |
+| `README.md` -> `README_UPSTREAM.md` | **Renamed, content unchanged** (identical Git blob `f55d8c9`). The upstream project documentation stays in the repository and is linked from the new README, the design guide and `docs/source/`. |
+| `README.md` (new file) | Xu Lab AI Binder Design Platform README: overview, H200/SLURM environment table, feature table, the notebook path, usage, expected outputs, a validation-status table, and licensing/attribution. |
+
+No upstream *content* was edited and nothing was deleted: the upstream README's
+bytes are preserved under the new name, `LICENSE` and
+`README_licensing_section.md` are untouched, `docs/` and `examples/` keep their
+documentation, and the design algorithms, notebook and settings are unchanged.
+`examples/README.md` links back to `../README.md`, which now reaches the lab
+README; its deep links to upstream sections (for example
+`#design-modalities`) live in `README_UPSTREAM.md`.
+
+### Honesty constraints in the new README
+
+The status banner, the per-item validation table and the outputs section all
+state that no campaign has been run from this copy, that no binder has been
+produced, that GPU execution is unproven, and that computational acceptance is
+not experimental evidence.
+
 ## 2026-11-20 (Phase 2) - Jupyter interface for the CMRI HPC
 
 Authorised by the user after the Phase 1 review. Upstream code is still
