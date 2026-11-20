@@ -53,15 +53,16 @@ structures), `scaffolds/`, the 27 `examples/*.json` campaigns, `docs/`,
 No upstream file was modified or deleted. Additions only:
 
 ```
-.gitattributes                        LF enforcement for every Linux-executed file
-lab/slurm/run_bindcraft_h200.slurm    H200 batch launcher
-lab/configs/pdl1_smoke.json           PD-L1 smoke campaign
-lab/scripts/hpc_preflight.sh          login-node checks (dirs, imports, weights, CRLF)
-lab/scripts/make_release.sh           reproducible transfer archive + BUILD_REVISION.txt
-lab/scripts/validate_outputs.py       read-only output validator and report
-lab/notebooks/README.md               Phase 2 placeholder (not implemented)
-lab/README.md  lab/SOURCE_INVENTORY.md  lab/CHANGELOG_XULAB.md
-README_XULAB.md                       this file
+.gitattributes                           LF enforcement for every Linux-executed file
+lab/slurm/run_bindcraft_h200.slurm       H200 batch launcher
+lab/configs/pdl1_smoke.json              PD-L1 smoke campaign
+lab/scripts/hpc_preflight.sh             login-node checks (dirs, imports, weights, CRLF)
+lab/scripts/make_release.sh              reproducible transfer archive + BUILD_REVISION.txt
+lab/scripts/validate_outputs.py          read-only output validator and report
+lab/notebooks/xulab_bindcraft_h200.ipynb Jupyter interface for the HPC (Phase 2)
+lab/notebooks/xulab_hpc.py               the notebook's logic, importable and testable
+lab/README.md  lab/SOURCE_INVENTORY.md  lab/CHANGELOG_XULAB.md  lab/notebooks/README.md
+README_XULAB.md                          this file
 ```
 
 ---
@@ -81,7 +82,8 @@ C:\XuLab\BindCraft2\            <- the Git clone itself, no nested second clone
 │   ├── scripts\hpc_preflight.sh
 │   ├── scripts\make_release.sh
 │   ├── scripts\validate_outputs.py
-│   ├── notebooks\              (reserved for Phase 2)
+│   ├── notebooks\xulab_bindcraft_h200.ipynb   the Jupyter interface
+│   ├── notebooks\xulab_hpc.py                 its logic, as a module
 │   ├── README.md  SOURCE_INVENTORY.md  CHANGELOG_XULAB.md
 │   └── BUILD_REVISION.txt      (written by make_release.sh, untracked)
 ├── bindcraft.py  bindcraft.ipynb  bindcraft.slurm  install.sh
@@ -479,14 +481,52 @@ drops its row when the campaign closes - do it deliberately, never as cleanup.
 | Python imports the new source copy | **MECHANISMS PREPARED + CHECKS WRITTEN**; not yet demonstrated on the HPC |
 | Level A - compute smoke | **NOT TESTED** |
 | Level B - end-to-end binder output | **NOT ACHIEVED** |
-| Phase 2 Jupyter UI | **NOT STARTED** (awaiting approval; `lab/notebooks/` is empty) |
+| Phase 2 Jupyter notebook (`lab/notebooks/xulab_bindcraft_h200.ipynb`) | **IMPLEMENTED**; `nbformat`-valid, all 10 code cells and every widget callback exercised locally against synthetic fixtures; **never run on the HPC** |
+| Phase 2 helper module (`lab/notebooks/xulab_hpc.py`) | **IMPLEMENTED**; 90 local assertions pass on both the pandas and no-pandas paths |
+| Real `sbatch` / `squeue` / `sacct` behaviour from the notebook | **NOT TESTED** (no SLURM on the development machine) |
+| `py3Dmol` rendering inside institutional Jupyter | **NOT TESTED** (needs internet access for 3Dmol.js) |
 
 No GPU job, campaign, `sbatch`, `srun` or HPC command has been run from this
 copy. Every PASS in this project must cite a log path and line.
 
 ---
 
-## 7. Licensing and safety
+## 7. The Jupyter notebook on CMRI HPC (Phase 2)
+
+`lab/notebooks/xulab_bindcraft_h200.ipynb` is the official `bindcraft.ipynb`
+adapted for regular Jupyter here; `bindcraft.ipynb` itself is untouched. All of
+its non-widget logic is in `lab/notebooks/xulab_hpc.py`, which imports and runs
+without Jupyter, SLURM or a GPU, so it can be tested and reviewed on its own.
+
+```bash
+# on the HPC, with the bindcraft2 environment active
+cd /project/yli4/ypan/bindcraft/BindCraft2
+jupyter lab                      # or the institutional Jupyter/Workbench launcher
+#   open lab/notebooks/xulab_bindcraft_h200.ipynb
+```
+
+The ten steps: environment report → target → binder and campaign → submit to
+SLURM → job status and log → load results → interface and confidence readings →
+3D complexes → export → audit with `validate_outputs.py`. Details and the full
+Colab-to-Jupyter mapping: [`lab/notebooks/README.md`](lab/notebooks/README.md).
+
+What it does **not** do: design anything in the kernel (every campaign is a
+batch job, so closing the notebook leaves it running), install packages,
+download weights, write into the source checkout, offer the `no_filters`
+shortcut, or make any claim about the GPU - the H200 is evidenced only by the
+job's own log.
+
+Paths come from `XULAB_PROJECT_ROOT`, `XULAB_BC2_HOME`, `XULAB_RESULTS`,
+`XULAB_LOGS`, `XULAB_CACHE`, `XULAB_TMP` and `XULAB_PYTHON` where set, so a
+second user or a second project root needs no edit to a tracked file. Submitted
+jobs are recorded in `results/.xulab_jobs.json`, which is how a later notebook
+session finds a running campaign, its log and its results folder again.
+
+If `ipywidgets` or `py3Dmol` is missing from the kernel, the environment cell
+says so and the rest still works: `py3Dmol` only affects step 8, and the CIF
+files can always be downloaded and opened locally.
+
+## 8. Licensing and safety
 
 BindCraft2 is **source-available with hosting restrictions**, not MIT. Internal
 organizational use and source modification are permitted subject to attribution

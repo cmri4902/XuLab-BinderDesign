@@ -13,3 +13,7 @@ cache/
 tmp/
 *.cif
 *.npz
+
+# Campaign settings the notebook writes per run. The authoritative record of what
+# a campaign ran with is campaign_metadata.json inside its results folder.
+configs/generated/

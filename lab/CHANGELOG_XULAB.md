@@ -7,6 +7,70 @@ commit `8c1a858fdc1bfc94c60846ff11a0d01c9aa44136` (`v1.0.4-4-g8c1a858`,
 The upstream license requires that modifications be marked. This file is that
 record.
 
+## 2026-11-20 (Phase 2) - Jupyter interface for the CMRI HPC
+
+Authorised by the user after the Phase 1 review. Upstream code is still
+unmodified: `bindcraft.ipynb` is left exactly as shipped and the Xu Lab notebook
+is a separate, adapted file.
+
+### Added
+
+| File | What it is |
+| --- | --- |
+| `lab/notebooks/xulab_bindcraft_h200.ipynb` | 22 cells (10 code), nbformat 4.5, kernel `python3`. Adapted from the official notebook's eight-step shape with the Colab machinery replaced. |
+| `lab/notebooks/xulab_hpc.py` | The notebook's logic as an importable module, so it is reviewable and testable outside Jupyter. |
+
+### Colab to Jupyter/SLURM changes
+
+| Upstream Colab behaviour | Replacement |
+| --- | --- |
+| Google Drive mount | `/project/yli4/ypan/bindcraft/` paths, overridable through `XULAB_*` environment variables |
+| `pip install` of ipywidgets/py3Dmol into the runtime | existing `bindcraft2` conda environment; a missing module is reported, never installed |
+| `google.colab.output.enable_custom_widget_manager()` | plain `ipywidgets` (no `google.colab` import in any code cell) |
+| campaign runs inside the notebook process | `sbatch lab/slurm/run_bindcraft_h200.slurm <settings.json>`; the kernel does no design work, so closing the notebook leaves the job running |
+| no job records | `results/.xulab_jobs.json` registry, so a later session finds the job, its log and its results folder |
+| `files.download(zip)` | export folder and zip under `results/exports/`, plus Jupyter `FileLink`s and the `scp` command |
+| AlphaFold parameters downloaded on demand | existing cluster copy located and passed as `BINDCRAFT_AF2_PARAMS`; nothing is downloaded |
+| `no_filters` demo shortcut | deliberately not offered: filtering off makes a campaign's numbers meaningless |
+
+### What the notebook shows and exports
+
+Ranked accepted designs; candidates with their `failed_filters` and a rejection
+tally; attempts with their termination stage; per-design confidence
+(`i_pDAE`, `i_pTM`, `i_pAE`, pLDDT) and interface readings (contacting residues,
+buried area, hotspot contact, clashes); 3D complexes through `py3Dmol`; binder
+FASTA (one record per binder chain, split on the `/` separator); the ranked,
+candidate, attempt and summary CSVs; `campaign_metadata.json`; the accepted
+`.cif` files; and the `validate_outputs.py` audit with its Level A / Level B
+verdicts.
+
+### Honesty constraints kept in the interface
+
+- The environment cell reports `GPU / H200: NOT TESTED` and says why: a Jupyter
+  node is not the batch allocation.
+- A dry run never returns a job id, and a missing `sbatch` is reported instead
+  of being worked around.
+- Zero accepted designs is presented as an ordinary outcome with the diagnostic
+  order from `docs/source/outputs.md`, not as a failure.
+- Every table states that acceptance is computational and not evidence of
+  binding.
+
+### Testing
+
+90 assertions against synthetic fixtures, run twice (with and without pandas):
+paths and environment reporting, AlphaFold parameter search including an
+incomplete set, preset and custom targets, settings building (name sanitising,
+length ordering, scaffolded modalities, unknown modality rejection, every
+written key checked against `settings/core/reference.json`), `sbatch` command
+construction, the job registry, campaign loading, zero-accepted handling,
+per-design reports, FASTA generation, mmCIF chain reading, export with zip, and
+the validator integration. All 10 notebook code cells execute and every widget
+callback fires. `nbformat` validates the notebook with no warnings.
+
+Not tested: a real `sbatch`, `squeue`/`sacct`, an H200 allocation, a real
+campaign, `py3Dmol` rendering in institutional Jupyter. No GPU execution is
+claimed.
+
 ## 2026-11-20 (revision 2) - Phase 1 review corrections
 
 Four issues raised in the Phase 1 review. Upstream code is still unmodified.
