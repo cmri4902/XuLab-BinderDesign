@@ -9,7 +9,7 @@ Open the notebook with a kernel from the `bindcraft2` conda environment:
 
 ```bash
 # on the HPC, from the source copy
-cd /project/yli4/ypan/bindcraft/BindCraft2
+cd /home/ypan/BindCraft2/BindCraft2_deploy
 jupyter lab            # or the institutional Jupyter/Workbench launcher
 #   then open lab/notebooks/xulab_bindcraft_h200.ipynb
 ```

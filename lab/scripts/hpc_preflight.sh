@@ -12,7 +12,7 @@
 #   7. free space, nvidia-smi, quota readings                   WARNING only
 #
 # Run from the lab source tree on the login node:
-#   cd /project/yli4/ypan/bindcraft/BindCraft2
+#   cd /home/ypan/BindCraft2/BindCraft2_deploy
 #   bash lab/scripts/hpc_preflight.sh
 #
 # Exit status:
@@ -25,8 +25,10 @@
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
+# Source tree in HOME, campaign artefacts in project storage. Independent, so
+# one can be moved or replaced without the other.
 XULAB_PROJECT_ROOT="${XULAB_PROJECT_ROOT:-/project/yli4/ypan/bindcraft}"
-XULAB_BC2_HOME="${XULAB_BC2_HOME:-${XULAB_PROJECT_ROOT}/BindCraft2}"
+XULAB_BC2_HOME="${XULAB_BC2_HOME:-/home/ypan/BindCraft2/BindCraft2_deploy}"
 XULAB_PYTHON="${XULAB_PYTHON:-/home/ypan/.conda/envs/bindcraft2/bin/python}"
 
 # Directories the campaign writes into. Every one of them is required: a missing

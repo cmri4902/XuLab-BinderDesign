@@ -7,6 +7,50 @@ commit `8c1a858fdc1bfc94c60846ff11a0d01c9aa44136` (`v1.0.4-4-g8c1a858`,
 The upstream license requires that modifications be marked. This file is that
 record.
 
+## 2026-11-20 (Phase 2c) - final HPC paths
+
+The deployment location was fixed by the user: the source tree and the notebook
+live in HOME, while every campaign artefact stays on project storage.
+
+| Role | Path |
+| --- | --- |
+| Source code and Jupyter notebook | `/home/ypan/BindCraft2/BindCraft2_deploy` |
+| Campaign output | `/project/yli4/ypan/bindcraft/results` |
+| SLURM logs | `/project/yli4/ypan/bindcraft/logs` |
+| Persistent caches (JAX compilation, weight cache) | `/project/yli4/ypan/bindcraft/cache` |
+| Temporary files (`TMPDIR`) | `/project/yli4/ypan/bindcraft/tmp` |
+| Conda environment (unchanged) | `/home/ypan/.conda/envs/bindcraft2` |
+
+### Changed
+
+| File | Change |
+| --- | --- |
+| `lab/slurm/run_bindcraft_h200.slurm` | `XULAB_BC2_HOME` now defaults to the HOME deployment directory instead of being derived from `XULAB_PROJECT_ROOT`; the two roots are independent. `--output`/`--error`, results, cache and `TMPDIR` still point at project storage. |
+| `lab/scripts/hpc_preflight.sh` | same decoupling, so the write-permission and import-origin checks test the real layout. |
+| `lab/notebooks/xulab_hpc.py` | `SOURCE_TREE` defaults to the HOME deployment directory; `RESULTS_ROOT`, `LOGS_ROOT`, `CACHE_ROOT` and `TMP_ROOT` stay under the project root. All still overridable through `XULAB_*`. |
+| `lab/notebooks/xulab_bindcraft_h200.ipynb` | the `sys.path` fallback for a kernel started elsewhere, the Colab comparison table, the storage note and the first-campaign instructions. No cell logic or widget behaviour changed. |
+| `lab/scripts/make_release.sh` | the archive now unpacks to `BindCraft2_deploy/` (overridable with `XULAB_DEPLOY_NAME`), so no rename is needed on the HPC, and the printed transfer commands target `/home/ypan/BindCraft2/`. |
+| `README.md`, `README_XULAB.md`, `lab/README.md`, `lab/notebooks/README.md` | environment tables, directory trees, transfer, submission, import-verification and troubleshooting commands. |
+
+`lab/configs/pdl1_smoke.json` needed no change: its `project_folder` was already
+`/project/yli4/ypan/bindcraft/results/pdl1_h200_smoke`.
+
+### Not changed
+
+No AI algorithm, no dependency, no environment, and no notebook functionality.
+Upstream file contents remain untouched, and the notebook's cells still do
+exactly what they did before - only the default paths they print and fall back
+to have moved.
+
+### Regression tests after the move
+
+`bash -n` on all three shell scripts; `xulab_hpc.py` suite (90 assertions) on
+both the pandas and no-pandas paths; the notebook execution suite (all 10 code
+cells plus every widget callback, including a dry-run submission, campaign load,
+export with zip and a validator run); `nbformat` validation; a real
+`make_release.sh` build verified to unpack as `BindCraft2_deploy` with the 12
+bundled checkpoints and no CRLF.
+
 ## 2026-11-20 (Phase 2b) - repository homepage
 
 The GitHub homepage renders the root `README.md`, which was upstream's project

@@ -103,18 +103,27 @@ C:\XuLab\BindCraft2\            <- the Git clone itself, no nested second clone
 ### HPC tree (to be created; see §3)
 
 ```text
-/project/yli4/ypan/bindcraft/
-├── BindCraft2/              the source copy, replaceable at any time
+/home/ypan/BindCraft2/BindCraft2_deploy/      the source copy and the notebook (HOME storage)
+├── bindcraft/               upstream package, replaceable at any time
+├── lab/                     Xu Lab launcher, configs, scripts, notebooks
+└── ...                      the rest of the upstream tree
+
+/project/yli4/ypan/bindcraft/        campaign data (project storage)
 ├── results/                 campaign output, NEVER deleted by a source update
-│   └── pdl1_h200_smoke/
+│   ├── pdl1_h200_smoke/
+│   ├── exports/             notebook exports (FASTA, CSV, CIF, zip)
+│   └── .xulab_jobs.json     submitted job registry
 ├── logs/                    SLURM stdout/stderr (must exist before sbatch)
 ├── cache/                   jax/ compilation cache, bindcraft/ weight cache
 └── tmp/                     TMPDIR for the job
 ```
 
-Source and data are deliberately siblings: `rm -rf BindCraft2 && rsync` again
-cannot touch `results/`. Nothing is written to `$HOME` (≈300 GB quota) and no
-second copy of the 5.3 GB AlphaFold parameters is ever made.
+Source and data are in different trees: replacing the deployment directory
+cannot touch `results/`. Only the source copy (about 100 MB including the
+bundled ProteinMPNN checkpoints) lives in HOME; campaign output, logs, JAX
+caches and temporary files all go to project storage, so the HOME quota is not
+consumed by campaigns, and no second copy of the 5.3 GB AlphaFold parameters is
+ever made.
 
 ### Reused, not recreated
 
@@ -175,6 +184,7 @@ not been confirmed and are not invented here.
 ```bash
 # on a login node
 ls -ld /project/yli4/ypan                       # confirm the parent is writable
+mkdir -p /home/ypan/BindCraft2                  # HOME parent for the source copy
 mkdir -p /project/yli4/ypan/bindcraft/{results,logs,cache/jax,tmp}
 touch /project/yli4/ypan/bindcraft/.write_probe && rm /project/yli4/ypan/bindcraft/.write_probe
 df -h /project/yli4/ypan/bindcraft              # confirm free space
@@ -216,18 +226,21 @@ Then, from **PowerShell or Git Bash** (plain `scp`, no brace expansion, no
 rsync needed):
 
 ```powershell
-scp C:\XuLab\bc2_release\bindcraft2_xulab_<short>_<state>_<stamp>.tar.gz <user>@<hpc-host>:/project/yli4/ypan/bindcraft/
+scp C:\XuLab\bc2_release\bindcraft2_xulab_<short>_<state>_<stamp>.tar.gz <user>@<hpc-host>:/home/ypan/BindCraft2/
 ```
 
 On the HPC:
 
 ```bash
-cd /project/yli4/ypan/bindcraft
-# tar merges into an existing BindCraft2/; move the old source aside for a clean
-# replacement. results/, logs/, cache/ and tmp/ are siblings and are untouched.
-[ -d BindCraft2 ] && mv BindCraft2 BindCraft2.$(date +%Y%m%d%H%M%S).bak
-tar -xzf bindcraft2_xulab_<short>_<state>_<stamp>.tar.gz     # unpacks ./BindCraft2
-cat BindCraft2/lab/BUILD_REVISION.txt                        # provenance of this copy
+mkdir -p /home/ypan/BindCraft2
+cd /home/ypan/BindCraft2
+# The archive unpacks to BindCraft2_deploy/, the deployment directory name, so no
+# rename is needed. tar merges into an existing directory, so move the old copy
+# aside for a clean replacement. Nothing under /project/yli4/ypan/bindcraft/ is
+# touched: results, logs, caches and tmp live there, not here.
+[ -d BindCraft2_deploy ] && mv BindCraft2_deploy BindCraft2_deploy.$(date +%Y%m%d%H%M%S).bak
+tar -xzf bindcraft2_xulab_<short>_<state>_<stamp>.tar.gz     # unpacks ./BindCraft2_deploy
+cat BindCraft2_deploy/lab/BUILD_REVISION.txt                 # provenance of this copy
 ```
 
 #### Option B - rsync of the working tree (for incremental re-syncs)
@@ -240,7 +253,7 @@ source directory only, never at the project root:
 rsync -av --delete \
   --exclude '.git/' --exclude '__pycache__/' --exclude '.venv/' \
   --exclude '.ipynb_checkpoints/' \
-  /c/XuLab/BindCraft2/ <user>@<hpc-host>:/project/yli4/ypan/bindcraft/BindCraft2/
+  /c/XuLab/BindCraft2/ <user>@<hpc-host>:/home/ypan/BindCraft2/BindCraft2_deploy/
 ```
 
 rsync copies bytes, so this only ships LF if the Windows working tree is LF.
@@ -253,7 +266,7 @@ git config core.autocrlf        # expect: false
 git ls-files --eol install.sh lab/slurm/run_bindcraft_h200.slurm   # expect w/lf
 
 # HPC, after the transfer
-cd /project/yli4/ypan/bindcraft/BindCraft2
+cd /home/ypan/BindCraft2/BindCraft2_deploy
 grep -rlU $'\r' --include='*.sh' --include='*.slurm' . || echo "no CRLF, good"
 ```
 
@@ -273,7 +286,7 @@ committed yet, so until then Option A is the reproducible route.
 ### 3.3 Preflight on the login node
 
 ```bash
-cd /project/yli4/ypan/bindcraft/BindCraft2
+cd /home/ypan/BindCraft2/BindCraft2_deploy
 bash lab/scripts/hpc_preflight.sh
 ```
 
@@ -306,7 +319,7 @@ export BINDCRAFT_AF2_PARAMS=<absolute dir holding params_*.npz>
 
 ```bash
 mkdir -p /project/yli4/ypan/bindcraft/logs          # SLURM opens --output before the job runs
-cd /project/yli4/ypan/bindcraft/BindCraft2
+cd /home/ypan/BindCraft2/BindCraft2_deploy
 sbatch --export=ALL,BINDCRAFT_AF2_PARAMS="$BINDCRAFT_AF2_PARAMS" \
   lab/slurm/run_bindcraft_h200.slurm lab/configs/pdl1_smoke.json
 # add --account=<account> if this site charges work to one
@@ -333,7 +346,7 @@ ls /project/yli4/ypan/bindcraft/results/pdl1_h200_smoke/workers/
 ```
 
 Expected early lines: the host and job id, the `nvidia-smi` table naming an
-H200, `xulab-bc2: bindcraft /project/yli4/ypan/bindcraft/BindCraft2/bindcraft/__init__.py`,
+H200, `xulab-bc2: bindcraft /home/ypan/BindCraft2/BindCraft2_deploy/bindcraft/__init__.py`,
 and `xulab-bc2: jax 0.11.2 backend=gpu`.
 
 ### 3.6 Validate the output
@@ -400,7 +413,7 @@ Retrieve results into `C:\XuLab\results\`, outside the Git clone.
 Three independent mechanisms, because the existing conda environment may hold an
 **editable** install pointing at the older source directory:
 
-1. the job `cd`s into `/project/yli4/ypan/bindcraft/BindCraft2`, and
+1. the job `cd`s into `/home/ypan/BindCraft2/BindCraft2_deploy`, and
    `bindcraft.py` inserts its own directory at the front of `sys.path`;
 2. `PYTHONPATH` is prefixed with the lab tree and `BINDCRAFT_HOME` names it;
 3. the gate process asserts it, comparing the resolved `bindcraft.__file__`
@@ -410,14 +423,14 @@ Verify by hand at any time (the printed path, not the version string, is the
 evidence):
 
 ```bash
-cd /project/yli4/ypan/bindcraft/BindCraft2
+cd /home/ypan/BindCraft2/BindCraft2_deploy
 BINDCRAFT_HOME=$PWD PYTHONPATH=$PWD /home/ypan/.conda/envs/bindcraft2/bin/python -s \
   -c 'import bindcraft, pathlib; print(pathlib.Path(bindcraft.__file__).resolve())'
-# must print /project/yli4/ypan/bindcraft/BindCraft2/bindcraft/__init__.py
+# must print /home/ypan/BindCraft2/BindCraft2_deploy/bindcraft/__init__.py
 ```
 
 If it prints a path under the older installation, that installation is winning
-the import; `pip install -e /project/yli4/ypan/bindcraft/BindCraft2` inside the
+the import; `pip install -e /home/ypan/BindCraft2/BindCraft2_deploy` inside the
 environment is the permanent fix (it replaces the old editable pointer, and the
 `lab/` scripts keep working either way).
 
@@ -460,9 +473,11 @@ card reuse them.
 
 ### Protecting completed campaigns
 
-Results live in `/project/yli4/ypan/bindcraft/results/`, outside the source
-tree, so updating the code cannot delete them. Keep `--delete` in any `rsync`
-pointed only at `.../bindcraft/BindCraft2/`, never at `.../bindcraft/`. Deleting
+Results live in `/project/yli4/ypan/bindcraft/results/` on project storage,
+while the source copy lives in `/home/ypan/BindCraft2/BindCraft2_deploy`, so
+updating or replacing the code cannot delete them. Keep `--delete` in any
+`rsync` pointed only at `/home/ypan/BindCraft2/BindCraft2_deploy/`, never at
+`/home/ypan/BindCraft2/` or at the project tree. Deleting
 a `.cif` from `3_Ranked/` is upstream's documented way to reject a design and
 drops its row when the campaign closes - do it deliberately, never as cleanup.
 
@@ -483,7 +498,7 @@ drops its row when the campaign closes - do it deliberately, never as cleanup.
 | `.gitattributes` + `core.autocrlf=false` | **DONE and VERIFIED locally**: all Linux-executed scripts, upstream ones included, are LF on disk, and `git diff HEAD` against commit `8c1a858` is empty |
 | `README_XULAB.md` + change log | **DONE** |
 | HPC deployment plan and commands | **DONE** as documentation; **NOT EXECUTED** |
-| HPC directories under `/project/yli4/ypan/bindcraft/` | **NOT CREATED** (no HPC access from here) |
+| HPC directories (`/home/ypan/BindCraft2/BindCraft2_deploy`, `/project/yli4/ypan/bindcraft/{results,logs,cache,tmp}`) | **NOT CREATED** (no HPC access from here) |
 | Write permission on `/project/yli4/ypan/` | **NOT VERIFIED** (`lab/scripts/hpc_preflight.sh` verifies it) |
 | AlphaFold parameter path on the HPC | **NOT VERIFIED**; searched at run time, never hardcoded, never downloaded |
 | Python imports the new source copy | **MECHANISMS PREPARED + CHECKS WRITTEN**; not yet demonstrated on the HPC |
@@ -508,7 +523,7 @@ without Jupyter, SLURM or a GPU, so it can be tested and reviewed on its own.
 
 ```bash
 # on the HPC, with the bindcraft2 environment active
-cd /project/yli4/ypan/bindcraft/BindCraft2
+cd /home/ypan/BindCraft2/BindCraft2_deploy
 jupyter lab                      # or the institutional Jupyter/Workbench launcher
 #   open lab/notebooks/xulab_bindcraft_h200.ipynb
 ```

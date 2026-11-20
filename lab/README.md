@@ -36,6 +36,9 @@ submission and validation commands, are in `../README_XULAB.md`.
 
 ## Conventions
 
+- The source copy and this notebook directory live in HOME at
+  `/home/ypan/BindCraft2/BindCraft2_deploy` (about 100 MB, including the bundled
+  ProteinMPNN checkpoints).
 - Results, logs, caches and temporary files go under `/project/yli4/ypan/bindcraft/`,
   never into the source tree and never into `$HOME` (≈300 GB quota).
 - No Windows path appears in any file intended to run on the HPC.

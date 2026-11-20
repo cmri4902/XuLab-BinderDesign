@@ -35,8 +35,12 @@ from pathlib import Path
 # locations
 # --------------------------------------------------------------------------- #
 
+# The source copy and the notebook live in HOME; everything a campaign writes
+# lives in project storage. The two roots are independent, so the source tree can
+# be replaced without touching results, and results can be moved without
+# reinstalling the source.
 PROJECT_ROOT = Path(os.environ.get("XULAB_PROJECT_ROOT", "/project/yli4/ypan/bindcraft"))
-SOURCE_TREE = Path(os.environ.get("XULAB_BC2_HOME", str(PROJECT_ROOT / "BindCraft2")))
+SOURCE_TREE = Path(os.environ.get("XULAB_BC2_HOME", "/home/ypan/BindCraft2/BindCraft2_deploy"))
 RESULTS_ROOT = Path(os.environ.get("XULAB_RESULTS", str(PROJECT_ROOT / "results")))
 LOGS_ROOT = Path(os.environ.get("XULAB_LOGS", str(PROJECT_ROOT / "logs")))
 CACHE_ROOT = Path(os.environ.get("XULAB_CACHE", str(PROJECT_ROOT / "cache")))

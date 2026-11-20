@@ -45,7 +45,10 @@ holds_cr() { ! tr -d '\015' < "$1" | cmp -s - "$1"; }
 
 STAGING="$(mktemp -d)"
 trap 'rm -rf "${STAGING}"' EXIT
-TREE="${STAGING}/BindCraft2"
+# The archive unpacks to exactly the deployment directory name, so no rename is
+# needed on the HPC: /home/ypan/BindCraft2/BindCraft2_deploy.
+DEPLOY_NAME="${XULAB_DEPLOY_NAME:-BindCraft2_deploy}"
+TREE="${STAGING}/${DEPLOY_NAME}"
 mkdir -p "${TREE}"
 
 echo "make_release: exporting tracked files at ${COMMIT} (${DESCRIBE}, ${DIRTY})"
@@ -122,7 +125,7 @@ echo "  OK   12 bundled MPNN checkpoints, all required entry points present, no 
 
 mkdir -p "${OUTPUT_DIR}"
 ARCHIVE="${OUTPUT_DIR}/${NAME}.tar.gz"
-tar -czf "${ARCHIVE}" -C "${STAGING}" BindCraft2
+tar -czf "${ARCHIVE}" -C "${STAGING}" "${DEPLOY_NAME}"
 BUNDLE="${OUTPUT_DIR}/${NAME}.gitbundle"
 git bundle create "${BUNDLE}" --all > /dev/null 2>&1 \
   && echo "make_release: git history bundle: ${BUNDLE}" \
@@ -137,10 +140,11 @@ make_release: archive ready
   sha256   : $(sha256sum "${ARCHIVE}" | cut -d' ' -f1)
 
 Transfer and unpack (replace the placeholders with your own values):
-  scp "${ARCHIVE}" <user>@<hpc-host>:/project/yli4/ypan/bindcraft/
+  scp "${ARCHIVE}" <user>@<hpc-host>:/home/ypan/BindCraft2/
   ssh <user>@<hpc-host>
-  cd /project/yli4/ypan/bindcraft
-  tar -xzf ${NAME}.tar.gz                 # unpacks into ./BindCraft2
-  cat BindCraft2/lab/BUILD_REVISION.txt    # provenance of this copy
-  bash BindCraft2/lab/scripts/hpc_preflight.sh
+  mkdir -p /home/ypan/BindCraft2 /project/yli4/ypan/bindcraft/{results,logs,cache/jax,tmp}
+  cd /home/ypan/BindCraft2
+  tar -xzf ${NAME}.tar.gz                          # unpacks into ./${DEPLOY_NAME}
+  cat ${DEPLOY_NAME}/lab/BUILD_REVISION.txt        # provenance of this copy
+  bash ${DEPLOY_NAME}/lab/scripts/hpc_preflight.sh
 SUMMARY

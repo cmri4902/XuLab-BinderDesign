@@ -10,12 +10,12 @@
 # before this script runs):
 #
 #   mkdir -p /project/yli4/ypan/bindcraft/logs
-#   cd /project/yli4/ypan/bindcraft/BindCraft2
+#   cd /home/ypan/BindCraft2/BindCraft2_deploy
 #   sbatch lab/slurm/run_bindcraft_h200.slurm lab/configs/pdl1_smoke.json
 #
 # Optional overrides, all exported before sbatch or passed with --export:
-#   XULAB_BC2_HOME        source tree to execute   (default below)
-#   XULAB_PROJECT_ROOT    results/logs/cache/tmp root
+#   XULAB_BC2_HOME        source tree to execute, in HOME (default below)
+#   XULAB_PROJECT_ROOT    results/logs/cache/tmp root, in project storage
 #   XULAB_PYTHON          interpreter of the bindcraft2 conda environment
 #   BINDCRAFT_AF2_PARAMS  directory holding params_<model>.npz (never a file)
 #   BINDCRAFT_WEIGHTS     cache root holding alphafold/ and the shared caches
@@ -35,8 +35,10 @@
 set -euo pipefail
 
 # --- Xu Lab paths (HPC only; no Windows path belongs in this file) ----------
+# The source tree lives in HOME; every artefact the campaign writes lives in the
+# project tree. They are set independently so one can move without the other.
 XULAB_PROJECT_ROOT="${XULAB_PROJECT_ROOT:-/project/yli4/ypan/bindcraft}"
-XULAB_BC2_HOME="${XULAB_BC2_HOME:-${XULAB_PROJECT_ROOT}/BindCraft2}"
+XULAB_BC2_HOME="${XULAB_BC2_HOME:-/home/ypan/BindCraft2/BindCraft2_deploy}"
 XULAB_PYTHON="${XULAB_PYTHON:-/home/ypan/.conda/envs/bindcraft2/bin/python}"
 XULAB_RESULTS="${XULAB_PROJECT_ROOT}/results"
 XULAB_LOGS="${XULAB_PROJECT_ROOT}/logs"

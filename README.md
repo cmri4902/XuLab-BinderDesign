@@ -27,14 +27,15 @@ and weight reuse, output auditing, and the notebook - without touching the desig
 | GPU | NVIDIA H200, partition `gpu`, `--gres=gpu:h200:1` |
 | Scheduler | SLURM; `lab/slurm/run_bindcraft_h200.slurm` (8 CPUs, 64 GB host RAM, 08:00:00) |
 | Python | existing `bindcraft2` conda environment, `/home/ypan/.conda/envs/bindcraft2` (Python 3.12, JAX 0.11.2, CUDA 12 wheels) |
-| Source copy | `/project/yli4/ypan/bindcraft/BindCraft2` |
-| Campaign output | `/project/yli4/ypan/bindcraft/results/<campaign>/` |
+| Source copy and notebook | `/home/ypan/BindCraft2/BindCraft2_deploy` (HOME storage) |
+| Campaign output | `/project/yli4/ypan/bindcraft/results/<campaign>/` (project storage) |
 | Logs / caches | `/project/yli4/ypan/bindcraft/logs/`, `/project/yli4/ypan/bindcraft/cache/` |
 | AlphaFold parameters | the existing ~5.3 GB cluster copy, located at run time through `BINDCRAFT_AF2_PARAMS`; never re-downloaded and never committed |
 | ProteinMPNN / HyperMPNN weights | the 12 checkpoints shipped with the source (`bindcraft/weights/proteinmpnn/`) |
 
-Source and data are deliberately separate directories, so replacing the source copy cannot
-delete a completed campaign.
+The source copy sits in HOME and every campaign artefact in project storage, so replacing or
+updating the source cannot delete a completed campaign, and results never consume the HOME
+quota.
 
 ## Features
 
@@ -57,7 +58,7 @@ exposed: a campaign run without filtering produces numbers that mean nothing.
 ```bash
 # 1. once, on a login node
 mkdir -p /project/yli4/ypan/bindcraft/{results,logs,cache/jax,tmp}
-cd /project/yli4/ypan/bindcraft/BindCraft2
+cd /home/ypan/BindCraft2/BindCraft2_deploy
 conda activate bindcraft2
 bash lab/scripts/hpc_preflight.sh            # must print RESULT: READY
 export BINDCRAFT_AF2_PARAMS=<directory holding params_<model>.npz>
