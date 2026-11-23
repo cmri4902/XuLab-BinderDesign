@@ -1,10 +1,17 @@
 #!/bin/bash
 # ---------------------------------------------------------------------------
-# Xu Lab BindCraft2 - H200 campaign launcher (Phase 1B)
+# Xu Lab BindCraft2 - H200 campaign launcher (Phase 1C)
 #
 # Runs the Xu Lab source copy at $XULAB_BC2_HOME on one H200 card, writing every
 # artefact under $XULAB_PROJECT_ROOT. It installs nothing, downloads nothing, and
 # refuses to start if JAX cannot see a GPU.
+#
+# Execution model, settled by job 1015050 (COMPLETED, exit 0:0, cmri-gpu05):
+# everything runs DIRECTLY in the batch step. `sbatch` works on this cluster and
+# JAX 0.11.2 sees the H200 NVL with backend=gpu from the batch step itself, while
+# `srun` fails here with SLURM GRES errors. There is therefore no `srun` anywhere
+# in this file - not in the campaign, not in the gate, not in a diagnostic
+# fallback. Do not reintroduce one without a passing `srun` step on this cluster.
 #
 # Submit (the log directory must exist first, because Slurm opens --output
 # before this script runs):
@@ -19,10 +26,6 @@
 #   XULAB_PYTHON          interpreter of the bindcraft2 conda environment
 #   BINDCRAFT_AF2_PARAMS  directory holding params_<model>.npz (never a file)
 #   BINDCRAFT_WEIGHTS     cache root holding alphafold/ and the shared caches
-#   XULAB_SRUN            auto (default) | always | never - whether GPU work runs
-#                         as an srun step, which is what carries the GRES binding
-#                         on a cgroup-constrained cluster
-#   XULAB_SRUN_FLAGS      flags for that step (default: --ntasks=1 --gres=gpu:h200:1)
 #   XULAB_DIAGNOSTICS     1 (default) | 0 - print the in-allocation GPU report
 #   XULAB_KEEP_LD_STUBS   1 keeps stub libcuda directories on LD_LIBRARY_PATH
 #                         (default 0: they are removed, because a stub libcuda
@@ -30,10 +33,18 @@
 #
 # An account or a different partition is a site detail this file does not guess:
 #   sbatch --account=<account> lab/slurm/run_bindcraft_h200.slurm <config>
+#
+# The node below is the one the verified job ran on. A command-line flag beats a
+# directive in this file, so another H200 node needs no edit here:
+#   sbatch --nodelist=cmri-gpu06 lab/slurm/run_bindcraft_h200.slurm <config>
+# To let SLURM place the job on any H200 node, delete the --nodelist directive.
 # ---------------------------------------------------------------------------
 #SBATCH --job-name=xulab_bc2_h200
 #SBATCH --partition=gpu
+#SBATCH --nodelist=cmri-gpu05
 #SBATCH --gres=gpu:h200:1
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=08:00:00
@@ -53,8 +64,6 @@ XULAB_LOGS="${XULAB_PROJECT_ROOT}/logs"
 XULAB_CACHE="${XULAB_PROJECT_ROOT}/cache"
 XULAB_TMP="${XULAB_PROJECT_ROOT}/tmp"
 
-XULAB_SRUN="${XULAB_SRUN:-auto}"
-XULAB_SRUN_FLAGS="${XULAB_SRUN_FLAGS:---ntasks=1 --gres=gpu:h200:1}"
 XULAB_DIAGNOSTICS="${XULAB_DIAGNOSTICS:-1}"
 XULAB_KEEP_LD_STUBS="${XULAB_KEEP_LD_STUBS:-0}"
 
@@ -173,41 +182,26 @@ nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv 2>&1 
 # --- In-allocation diagnostics --------------------------------------------
 # Runs in this very job, so it needs no separate GPU test job. It reports device
 # nodes, the nvidia_uvm node CUDA needs but nvidia-smi does not, libcuda
-# resolution, cuInit and the JAX backend.
-GPU_RUN_MODE="direct"
+# resolution, cuInit and the JAX backend. There is no srun comparison step: srun
+# fails on this cluster with GRES errors, so a second view would report the
+# cluster's own limitation rather than anything about this campaign.
 DIAGNOSTICS="${XULAB_BC2_HOME}/lab/scripts/gpu_diagnostics.sh"
 if [[ ${XULAB_DIAGNOSTICS} == 1 && -f ${DIAGNOSTICS} ]]; then
   echo "xulab-bc2: diagnostics in the batch step"
   # set -e is active: capture the status without letting a failure end the job,
-  # because a failing diagnostic is information, not a reason to stop here.
+  # because a failing diagnostic is information, not a reason to stop here. The
+  # gate below is what actually decides whether the campaign starts.
   diagnostic_status=0
   bash "${DIAGNOSTICS}" || diagnostic_status=$?
   echo "xulab-bc2: batch-step diagnostics exit ${diagnostic_status}"
-  # A failure in the batch step and a pass under srun is the signature of a
-  # cluster that binds the GRES to the step, so collect both views once rather
-  # than guessing which one is true.
-  if [[ ${diagnostic_status} -ne 0 && ${XULAB_SRUN} != never ]] \
-     && command -v srun > /dev/null 2>&1 && [[ -n ${SLURM_JOB_ID:-} ]]; then
-    echo "xulab-bc2: repeating the diagnostics as an srun step for comparison"
-    srun_status=0
-    srun ${XULAB_SRUN_FLAGS} bash "${DIAGNOSTICS}" || srun_status=$?
-    echo "xulab-bc2: srun-step diagnostics exit ${srun_status}"
-    if [[ ${srun_status} -eq 0 ]]; then
-      echo "xulab-bc2: the GPU is reachable from an srun step but not from the batch"
-      echo "xulab-bc2: step: this cluster binds the GRES to the step, so the campaign"
-      echo "xulab-bc2: will run under srun"
-    fi
-  fi
 fi
 
 # --- Gate: the lab copy must be the imported package, on a real JAX GPU ----
 # Both facts are checked in one short process that exits before the campaign
 # starts, and a failure here is a nonzero exit rather than a CPU fallback.
 #
-# The gate is attempted as an srun step first. On a cluster with cgroup device
-# constraints the GRES binding is attached to the step, so a batch-step process
-# can see /dev/nvidiactl (enough for nvidia-smi) while CUDA finds no device.
-# Whichever mode passes the gate is the mode the campaign then runs in.
+# The gate runs in the batch step, exactly where the campaign runs, so passing it
+# proves the GPU is reachable from the process that will do the designing.
 gate_script='
 import os, sys, pathlib
 home = pathlib.Path(os.environ["BINDCRAFT_HOME"]).resolve()
@@ -232,44 +226,31 @@ if not any(device.platform in ("gpu", "cuda", "rocm") for device in devices):
 '
 
 gate_passed=0
-if [[ ${XULAB_SRUN} != never ]] && command -v srun > /dev/null 2>&1 && [[ -n ${SLURM_JOB_ID:-} ]]; then
-  echo "xulab-bc2: gate attempt 1: srun ${XULAB_SRUN_FLAGS}"
-  if srun ${XULAB_SRUN_FLAGS} "${XULAB_PYTHON}" -s -c "${gate_script}"; then
-    GPU_RUN_MODE="srun"
-    gate_passed=1
-  else
-    echo "xulab-bc2: the srun step did not pass the gate (exit $?)"
-  fi
-fi
-if [[ ${gate_passed} -eq 0 && ${XULAB_SRUN} != always ]]; then
-  echo "xulab-bc2: gate attempt 2: directly in the batch step"
-  if "${XULAB_PYTHON}" -s -c "${gate_script}"; then
-    GPU_RUN_MODE="direct"
-    gate_passed=1
-  else
-    echo "xulab-bc2: the batch step did not pass the gate (exit $?)"
-  fi
+echo "xulab-bc2: gate: running directly in the batch step"
+if "${XULAB_PYTHON}" -s -c "${gate_script}"; then
+  gate_passed=1
+else
+  echo "xulab-bc2: the batch step did not pass the gate (exit $?)"
 fi
 [[ ${gate_passed} -eq 1 ]] || fail \
   "no usable JAX GPU in this allocation (import origin and GPU both checked).
        The diagnostics above name the cause. The three that produce
        'cuInit(0) failed: CUDA_ERROR_NO_DEVICE' while nvidia-smi works are:
          * a stub libcuda on LD_LIBRARY_PATH   (search the log for 'STUB')
-         * /dev/nvidia-uvm missing from this step's cgroup (search for 'MISSING')
-         * CUDA_VISIBLE_DEVICES naming a device the step was not allocated
-       Rerun the diagnostics alone in an interactive allocation with
-         salloc --partition=gpu --gres=gpu:h200:1 -c 8 --mem=16G -t 00:20:00
-         bash lab/scripts/gpu_diagnostics.sh" 4
-echo "xulab-bc2: gate passed in ${GPU_RUN_MODE} mode"
+         * /dev/nvidia-uvm missing from this job's cgroup (search for 'MISSING')
+         * CUDA_VISIBLE_DEVICES naming a device the job was not allocated
+       Job 1015050 passed this gate on cmri-gpu05 with JAX 0.11.2 backend=gpu, so
+       a failure here points at the node or the allocation, not at the launcher.
+       Resubmit pinned to the verified node:
+         sbatch --nodelist=cmri-gpu05 lab/slurm/run_bindcraft_h200.slurm ${CONFIG}
+       Do not retry with srun: it fails on this cluster with GRES errors." 4
+echo "xulab-bc2: gate passed in the batch step"
 
 # --- Campaign --------------------------------------------------------------
-echo "xulab-bc2: launching (${GPU_RUN_MODE}): ${XULAB_PYTHON} bindcraft.py design ${CONFIG} $*"
+# Executed directly by this batch script. No srun: see the header.
+echo "xulab-bc2: launching: ${XULAB_PYTHON} -u bindcraft.py design ${CONFIG} $*"
 set +e
-if [[ ${GPU_RUN_MODE} == srun ]]; then
-  srun ${XULAB_SRUN_FLAGS} "${XULAB_PYTHON}" -u bindcraft.py design "${CONFIG}" "$@"
-else
-  "${XULAB_PYTHON}" -u bindcraft.py design "${CONFIG}" "$@"
-fi
+"${XULAB_PYTHON}" -u bindcraft.py design "${CONFIG}" "$@"
 status=$?
 set -e
 echo "xulab-bc2: campaign exit status ${status} finished=$(date -Is)"

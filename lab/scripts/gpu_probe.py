@@ -149,7 +149,9 @@ def driver_probe() -> int:
             say("     2. /dev/nvidia-uvm present in this step's device cgroup")
             say("     3. CUDA_VISIBLE_DEVICES naming a device this step was not "
                 "allocated (compare with SLURM_JOB_GPUS / SLURM_STEP_GPUS)")
-            say("     4. the work running in the batch step rather than under srun")
+            say("     4. the allocation itself carrying no GPU: resubmit with "
+                "--gres=gpu:h200:1 --nodelist=cmri-gpu05, the configuration job "
+                "1015050 completed on (srun is not usable on this cluster)")
         return 3
 
     count = ctypes.c_int()

@@ -1,0 +1,9 @@
+{
+  "modality": "binder",
+  "target": "hPDL1",
+  "campaign_name": "pdl1_h200_campaign",
+  "number_of_final_designs": 10,
+  "workers_per_gpu": 1,
+  "project_folder": "/project/yli4/ypan/bindcraft/results/pdl1_h200_campaign",
+  "resume": true
+}

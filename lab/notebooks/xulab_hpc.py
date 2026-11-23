@@ -379,11 +379,17 @@ def record_job(submission: Submission) -> None:
 
 
 def submit_campaign(config_path: Path, account: str = "", af2_parameters: str = "",
-                    extra_sbatch=(), dry_run: bool = False) -> Submission:
+                    nodelist: str = "", extra_sbatch=(), dry_run: bool = False) -> Submission:
     """sbatch the H200 launcher for one settings file.
 
-    The campaign runs entirely inside the batch job: this notebook kernel does no
-    design work, so closing the notebook leaves the job running.
+    The campaign runs entirely inside the batch job, executed directly by the
+    batch script with no srun step (srun fails on this cluster with GRES errors).
+    This notebook kernel does no design work, so closing the notebook leaves the
+    job running.
+
+    `nodelist` overrides the node the launcher pins by default (cmri-gpu05, the
+    node job 1015050 completed on); a command-line flag beats the directive in
+    the script. Leave it empty to use that default.
     """
     config_path = Path(config_path)
     if not config_path.is_file():
@@ -408,6 +414,8 @@ def submit_campaign(config_path: Path, account: str = "", af2_parameters: str = 
     command = ["sbatch", "--parsable", f"--export={','.join(exports)}"]
     if account.strip():
         command.append(f"--account={account.strip()}")
+    if nodelist.strip():
+        command.append(f"--nodelist={nodelist.strip()}")
     command += [str(part) for part in extra_sbatch]
     command += [str(SLURM_SCRIPT), str(config_path)]
 

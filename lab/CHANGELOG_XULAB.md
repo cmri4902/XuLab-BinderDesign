@@ -7,6 +7,63 @@ commit `8c1a858fdc1bfc94c60846ff11a0d01c9aa44136` (`v1.0.4-4-g8c1a858`,
 The upstream license requires that modifications be marked. This file is that
 record.
 
+## 2026-11-23 (Phase 3b) - the launcher runs on the proven sbatch path, no srun
+
+Job 1015050 settled the open question from Phase 3a. On `cmri-gpu05`, submitted
+with `sbatch`, the job COMPLETED with exit `0:0`: JAX 0.11.2 detected the NVIDIA
+H200 NVL with `backend=gpu` and a real GPU matrix computation passed. `srun`, by
+contrast, does not work in this CMRI setup at all - it fails with SLURM GRES
+errors - so the Phase 3a hypothesis that the GRES might be bound to the step is
+not merely unneeded here, it is unusable. The launcher now takes the one path
+that is proven, and `srun` is gone from the execution path entirely.
+
+### Added
+
+| File | What it does |
+| --- | --- |
+| `lab/configs/pdl1_campaign.json` | The real PD-L1 campaign, as opposed to the smoke test: upstream's own `examples/pdl1.json` request (`modality: binder`, `target: hPDL1`, 10 final designs) with the Xu Lab output path, `workers_per_gpu: 1` and `resume: true`, so a resubmission after the 08:00:00 wall clock continues the same `project_folder`. Every key was checked against `CAMPAIGN_SETTING_NAMES` in `bindcraft/settings.py` and the target against `settings/target/hPDL1.json`. Not yet executed. |
+
+### Changed
+
+| File | Change |
+| --- | --- |
+| `lab/slurm/run_bindcraft_h200.slurm` | (1) BindCraft2 is executed directly by the batch script: `"${XULAB_PYTHON}" -u bindcraft.py design "${CONFIG}" "$@"`, with no `srun` wrapper and no run-mode branch; (2) the import-origin + JAX-GPU gate runs in the batch step only - the `srun`-first attempt, the `XULAB_SRUN` / `XULAB_SRUN_FLAGS` knobs and the `GPU_RUN_MODE` plumbing are removed; (3) the diagnostics no longer repeat themselves as an `srun` step for comparison; (4) the proven allocation is pinned as directives: `--partition=gpu --nodelist=cmri-gpu05 --gres=gpu:h200:1 --nodes=1 --ntasks=1 --cpus-per-task=8 --mem=64G --time=08:00:00`, and a command-line `--nodelist` still overrides it; (5) the gate's failure message cites job 1015050 and says explicitly not to retry under `srun`. The hard refusal to design on CPU, the stub-`libcuda` strip, the `CUDA_VISIBLE_DEVICES` reconciliation, the `JAX_PLATFORMS` repair, the AlphaFold-parameter search and every output path are unchanged. |
+| `lab/notebooks/xulab_hpc.py` | `submit_campaign()` takes an optional `nodelist`, emitted as `--nodelist=<node>` before the script path, so the notebook can move a campaign off the pinned node without editing the launcher. Everything else about submission is unchanged: still `sbatch --parsable --export=ALL[,BINDCRAFT_AF2_PARAMS=...]`, still no `srun`, still no design work in the kernel. |
+| `lab/notebooks/xulab_bindcraft_h200.ipynb` | a *node (optional)* field in the submission widget, wired to that parameter; section 4 states the verified configuration and that nothing runs under `srun`; section 5 drops the retired "GRES bound to the srun step" cause from the gate-failure list. All ten code cells, the widget layout and every output path are otherwise untouched. |
+| `lab/scripts/gpu_probe.py` | the fourth ordered cause for `CUDA_ERROR_NO_DEVICE` no longer suggests `srun`; it now names an allocation carrying no GPU and gives the verified `--gres`/`--nodelist` resubmission. |
+| `README_XULAB.md` | the launcher is recorded as VERIFIED on the HPC with job 1015050; Level A - compute smoke is **PASS** with its evidence; `sbatch` is recorded as working and `srun` as not working in this setup; the troubleshooting tables drop the batch-step-GRES row and the "run the gate under `srun`" advice. |
+
+### Not changed
+
+No dependency was installed or upgraded, no completed environment test was
+repeated, no CUDA or JAX version changed, and no AI algorithm, scoring function
+or upstream file was touched. The JAX GPU safety gate still refuses to design on
+CPU. Source stays at `/home/ypan/BindCraft2/BindCraft2_deploy`, outputs under
+`/project/yli4/ypan/bindcraft/`.
+
+### Local tests
+
+73 assertions, all passing: `bash -n` on all four shell scripts and the
+launcher; a parser pass over every non-comment launcher line proving no `srun`
+invocation survives anywhere, including the diagnostics and the gate, and that
+`XULAB_SRUN` and `GPU_RUN_MODE` are gone; every `#SBATCH` directive compared
+against the proven configuration; the campaign line asserted to be the direct
+interpreter call and not inside a mode branch; the safety gate asserted present,
+hard-exiting, checking the import origin and requiring a GPU platform, with the
+embedded gate script parsed as Python to confirm the shell quoting is intact;
+the preserved repairs, the no-install/no-download property, the three HPC paths
+and LF-only line endings; the notebook re-validated as `nbformat` 4 with all ten
+code cells compiling and the node field wired through; and `submit_campaign()`
+dry-run commands checked end to end - `sbatch --parsable` first, no `--nodelist`
+by default, `--nodelist` and `--account` passed through before the script path,
+the settings file last, and no `srun` in the command. Both settings files were
+validated key by key against `CAMPAIGN_SETTING_NAMES`, their target preset
+confirmed to exist, their `project_folder` confirmed to sit under the project
+results root, and `workers_per_gpu` confirmed to be 1.
+
+Still not verified: a full design campaign (Level B). Level A is PASS on the
+evidence of job 1015050.
+
 ## 2026-11-20 (Phase 3a) - GPU initialisation fix after job 1014429
 
 The first real H200 job failed in JAX GPU initialisation. From the job's own

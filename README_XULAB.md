@@ -473,7 +473,7 @@ device and a device this process was actually granted:
 | A **stub `libcuda`** on `LD_LIBRARY_PATH` (the CUDA toolkit's link-time placeholder, often inherited from a conda prefix). It loads, then answers `cuInit` with `CUDA_ERROR_NO_DEVICE`. | `STUB .../stubs/libcuda.so.1` from the diagnostics, or `stub libcuda ahead of the real driver` from the probe | strips those directories from `LD_LIBRARY_PATH` before anything imports JAX (`XULAB_KEEP_LD_STUBS=1` disables this), and `hpc_preflight.sh` now blocks on it from the login node |
 | **`/dev/nvidia-uvm` missing** from the step's device cgroup | `MISSING /dev/nvidia-uvm` | reported explicitly; it needs a site fix (the module must be loaded on the node), and the diagnostics say so rather than letting the campaign fail obscurely |
 | **`CUDA_VISIBLE_DEVICES` naming a device this step was not given**, typically carried in by `--export=ALL` from the submitting shell (for example a Jupyter node's T4) | `CUDA_VISIBLE_DEVICES=... did not match the allocation` | reconciles it against `SLURM_STEP_GPUS` / `SLURM_JOB_GPUS`, with SLURM's view winning |
-| **The work running in the batch step** on a cluster that binds the GRES to the step | batch-step diagnostics fail, srun-step diagnostics pass | runs the gate as an `srun` step first and the campaign in whichever mode passed the gate (`XULAB_SRUN=auto|always|never`, `XULAB_SRUN_FLAGS`) |
+| **An allocation that carries no GPU at all** | `SLURM_JOB_GPUS=unset` with no `/dev/nvidia*` nodes | the launcher pins the verified `--gres=gpu:h200:1 --nodelist=cmri-gpu05` configuration and names it again in the failure message. It does **not** retry under `srun`: `srun` fails on this cluster with SLURM GRES errors, and job 1015050 proved the batch step alone reaches the H200 |
 | **`JAX_PLATFORMS=cpu`** forcing CPU execution | `env JAX_PLATFORMS=cpu` | unset for the job, and blocked by preflight |
 
 Every campaign job now prints this report before designing anything:
@@ -499,7 +499,7 @@ or dependency version changed, and no AI algorithm was touched.
 | Symptom in the log | Cause | Fix |
 | --- | --- | --- |
 | `ERROR: no JAX GPU in this allocation` | No GPU requested, `CUDA_VISIBLE_DEVICES` empty, or the CUDA driver failed to initialise | Read the diagnostics block above it in the log; see [GPU initialisation](#gpu-initialisation-what-stopped-job-1014429). Check `sacct -j <id> --format=ReqTRES%40`. |
-| `cuInit(0) failed: CUDA_ERROR_NO_DEVICE` while `nvidia-smi` works | stub `libcuda`, missing `/dev/nvidia-uvm`, a `CUDA_VISIBLE_DEVICES` the step was not given, or batch-step GRES binding | the launcher repairs the first and third, runs the gate under `srun` for the fourth, and names the second. Full order of causes in the section above. |
+| `cuInit(0) failed: CUDA_ERROR_NO_DEVICE` while `nvidia-smi` works | stub `libcuda`, missing `/dev/nvidia-uvm`, or a `CUDA_VISIBLE_DEVICES` the job was not given | the launcher repairs the first and third and names the second. Full order of causes in the section above. |
 | `ERROR: imported bindcraft from ...` outside the lab copy | Editable install of the older source wins | See §4. |
 | `AlphaFold parameters not found` | `BINDCRAFT_AF2_PARAMS` unset or wrong | Locate the existing copy (`find $HOME /project -maxdepth 6 -name 'params_model_1_multimer_v3.npz'`) and export the **directory**. Do not download. |
 | `RESOURCE_EXHAUSTED` / out of memory | VRAM or host RAM too small for the target | Keep `workers_per_gpu: 1`; raise `--mem` above 64G; shorten `binder_lengths`. |
@@ -530,8 +530,9 @@ drops its row when the campaign closes - do it deliberately, never as cleanup.
 | Complete upstream clone at `C:\XuLab\BindCraft2`, history and tags | **DONE** (186 tracked files, commit `8c1a858`) |
 | Upstream commit SHA and source inventory | **DONE** (`lab/SOURCE_INVENTORY.md`) |
 | All upstream modalities, presets, scaffolds, notebook, checkpoints preserved | **DONE** (no upstream file edited or deleted; `README.md` renamed to `README_UPSTREAM.md`, same blob) |
-| `lab/slurm/run_bindcraft_h200.slurm` | **PREPARED**, NOT TESTED (never submitted) |
+| `lab/slurm/run_bindcraft_h200.slurm` | **VERIFIED on the HPC**: job 1015050 COMPLETED (exit `0:0`) on `cmri-gpu05`, JAX 0.11.2 `backend=gpu` on the NVIDIA H200 NVL, GPU matrix computation PASS. Executes BindCraft2 directly in the batch step; no `srun` anywhere in the execution path |
 | `lab/configs/pdl1_smoke.json` | **PREPARED**, NOT RUN (keys checked against `bindcraft/settings.py`, not executed) |
+| `lab/configs/pdl1_campaign.json` | **PREPARED**, NOT RUN - the real PD-L1 campaign (upstream's `examples/pdl1.json` request, 10 final designs, `resume: true`, Xu Lab output path); keys checked against `bindcraft/settings.py` and the target against `settings/target/hPDL1.json`, not executed |
 | `lab/scripts/validate_outputs.py` | **PREPARED**; syntax-checked and exercised on synthetic fixtures outside the repository, including negative fixtures (allocation-only GPU evidence, nonzero exit, missing structure per candidate); never run against a real campaign |
 | `lab/scripts/hpc_preflight.sh` | **PREPARED**, NOT TESTED on the HPC; `bash -n` clean and its exit-code logic exercised locally against missing directories, a missing interpreter, missing AlphaFold parameters and a CRLF script |
 | `lab/scripts/make_release.sh` | **PREPARED**; `bash -n` clean and run locally in Git Bash to build a verified archive (content, 12 checkpoints, no CRLF). Never transferred to the HPC |
@@ -542,15 +543,16 @@ drops its row when the campaign closes - do it deliberately, never as cleanup.
 | Write permission on `/project/yli4/ypan/` | **NOT VERIFIED** (`lab/scripts/hpc_preflight.sh` verifies it) |
 | AlphaFold parameter path on the HPC | **NOT VERIFIED**; searched at run time, never hardcoded, never downloaded |
 | Python imports the new source copy | **MECHANISMS PREPARED + CHECKS WRITTEN**; not yet demonstrated on the HPC |
-| Level A - compute smoke | **NOT TESTED** |
+| Level A - compute smoke | **PASS** - job 1015050, COMPLETED exit `0:0`, JAX 0.11.2 `backend=gpu`, H200 NVL detected, GPU matrix computation PASS |
 | Level B - end-to-end binder output | **NOT ACHIEVED** |
 | Phase 2 Jupyter notebook (`lab/notebooks/xulab_bindcraft_h200.ipynb`) | **IMPLEMENTED**; `nbformat`-valid, all 10 code cells and every widget callback exercised locally against synthetic fixtures; **never run on the HPC** |
 | Phase 2 helper module (`lab/notebooks/xulab_hpc.py`) | **IMPLEMENTED**; 90 local assertions pass on both the pandas and no-pandas paths |
-| Real `sbatch` / `squeue` / `sacct` behaviour from the notebook | **NOT TESTED** (no SLURM on the development machine) |
+| Real `sbatch` behaviour on the HPC | **VERIFIED**: `sbatch` works on `cmri-gpu05`. `srun` does **not** work in this CMRI setup (SLURM GRES errors), so nothing in the execution path uses it |
+| `squeue` / `sacct` polling from the notebook kernel | **NOT TESTED** (no SLURM on the development machine) |
 | `py3Dmol` rendering inside institutional Jupyter | **NOT TESTED** (needs internet access for 3Dmol.js) |
 
-No GPU job, campaign, `sbatch`, `srun` or HPC command has been run from this
-copy. Every PASS in this project must cite a log path and line.
+Level A is PASS on the evidence of job 1015050. A full design campaign (Level B)
+has not been run. Every PASS in this project must cite a log path and line.
 
 ---
 
