@@ -553,8 +553,9 @@ drops its row when the campaign closes - do it deliberately, never as cleanup.
 | Phase 5 example settings (`lab/configs/cd19_scfv_discovery.json`) | **PREPARED**, NOT RUN - keys and target-path resolution checked against `bindcraft/settings.py` (`read_settings` resolves `targets[].target_path`; the scFv `binder_scaffold` resolves from the preset against the repository root), not executed |
 | Phase 5 scFv annotation, Top 10 report and individual 3D viewer | **IMPLEMENTED**; 128 local assertions in `lab/scripts/test_scfv_annotation.py` and every cell-2/3/7/8/9 widget callback exercised by `lab/scripts/test_notebook_cells.py`. **Never run on real campaign output** |
 | Phase 5 target step, generic reporting and chain labelling | **IMPLEMENTED**; 155 local assertions in `lab/scripts/test_target_tools.py` (PDB and mmCIF parsing, declared mutations and unplaced residues, chain-ambiguity refusal, preparation, FASTA and upload handling, RCSB routing and offline behaviour) |
-| Phase 5 isolated development deployment | **IMPLEMENTED and TESTED LOCALLY**; 102 assertions in `lab/scripts/test_deployment_isolation.py` prove all thirteen derived paths and a real `dry_run` `sbatch` command name neither production tree. `lab/scripts/setup_dev_deployment.sh` is `bash -n` clean and was dry-run locally, including its refusal of the production paths. **The HPC directories do not exist yet and nothing has been cloned** |
-| Any campaign on the H200 since the PD-L1 smoke test | **NOT SUBMITTED** - no HPC access from the development machine. The exact commands are §8.1, §9.2 and §9.3; no job ID exists |
+| Phase 5 isolated development deployment | **IMPLEMENTED and TESTED LOCALLY**; 118 assertions in `lab/scripts/test_deployment_isolation.py` prove all thirteen derived paths and a real `dry_run` `sbatch` command name neither production tree. `lab/scripts/setup_dev_deployment.sh` is `bash -n` clean and was dry-run locally, including its refusal of the production paths. **The HPC directories do not exist yet and nothing has been cloned** |
+| Phase 5a CD19 campaign validation | **36 static checks PASS, 0 FAIL** against the rules in `bindcraft/settings.py`, `bindcraft/protein_preparation.py` and `settings/modality/scFv.json`: every campaign and target key recognised, the target file single-chain and clean, all four hotspots present in it, the scFv scaffold's two chains and all 23 `mutate_positions` spans in range, and all six CDR loops anchored on both sides. One blocker was found and fixed - the settings file named the production project root |
+| Any campaign on the H200 since the PD-L1 smoke test | **NOT SUBMITTED** - no HPC access from the development machine. The exact commands are §9.2 and §9.3; no job ID, no H200 evidence and no CD19 result exists |
 | Real `sbatch` behaviour on the HPC | **VERIFIED**: `sbatch` works on `cmri-gpu05`. `srun` does **not** work in this CMRI setup (SLURM GRES errors), so nothing in the execution path uses it |
 | `squeue` / `sacct` polling from the notebook kernel | **NOT TESTED** (no SLURM on the development machine) |
 | `py3Dmol` rendering inside institutional Jupyter | **NOT TESTED** (needs internet access for 3Dmol.js) |
@@ -740,7 +741,8 @@ Acceptance means the configured computational filters passed.
 ## 9. The isolated development deployment
 
 Development happens in a second deployment that shares the cluster's conda
-environment and model weights and **nothing else** with production.
+environment and the existing AlphaFold parameter set, and **nothing else**,
+with production.
 
 | | Production | Development |
 | --- | --- | --- |
@@ -752,8 +754,9 @@ environment and model weights and **nothing else** with production.
 | Caches, tmp, JAX cache | `<project>/cache`, `/tmp` | `<project>/cache`, `/tmp` |
 | Generated campaign JSON | `<source>/lab/configs/generated` | `<source>/lab/configs/generated` |
 | Job registry | `<project>/results/.xulab_jobs.json` | `<project>/results/.xulab_jobs.json` |
-| conda environment | `/home/ypan/.conda/envs/bindcraft2` | **the same, shared, read only** |
-| AlphaFold / MPNN weights | `/project/yli4/ypan/bindcraft/cache/bindcraft` | **the same, shared, read only** |
+| Writable weight cache (`BINDCRAFT_WEIGHTS`) | `<project>/cache/bindcraft` | `<project>/cache/bindcraft` |
+| conda environment | `/home/ypan/.conda/envs/bindcraft2` | **the same, shared, executed only** |
+| AlphaFold parameters (`BINDCRAFT_AF2_PARAMS`) | wherever the 5.3 GB set already is | **the same path, read only, never copied and never downloaded** |
 
 ### 9.1 How the separation is enforced
 
@@ -773,12 +776,17 @@ Two mechanisms do the work:
    directive in the script. For production the values are identical to the
    launcher's own; for development nothing can fall back into the production
    tree. `BINDCRAFT_AF2_PARAMS` and `BINDCRAFT_WEIGHTS` are passed through, so
-   the shared weights are reused and never copied.
+   the existing parameter set is read in place and never copied. Note that
+   `BINDCRAFT_WEIGHTS` - the one weight path the launcher creates - is the dev
+   cache, not the production one, so a dev run cannot write into production
+   even if a future change tried to fetch a weight.
 
 `lab/scripts/test_deployment_isolation.py` asserts this: it loads the helper
 under each deployment's variables, checks all thirteen derived paths, builds a
 real `sbatch` command with `dry_run=True`, and fails if the production source
-tree or project tree is named anywhere in it. 102 assertions, passing.
+tree or project tree is named anywhere in it, and asserts that the committed
+CD19 campaign settings file writes into the development tree. 118 assertions,
+passing.
 
 ### 9.2 Setting it up (exact commands)
 
@@ -814,57 +822,157 @@ ls -ld /project/yli4/ypan/bindcraft/results/pdl1_h200_smoke \
 ls /project/yli4/ypan/bindcraft/results
 ```
 
-### 9.3 Running a campaign in the development deployment
+### 9.3 Running the CD19-scFv campaign (exact commands)
+
+`lab/configs/cd19_scfv_discovery.json` is committed with the **development**
+paths, so no settings file has to be written: steps 1-5 below are the whole
+sequence. Run them in order; each one is checkable before the next.
+
+#### Step 1 - deploy the source tree
+
+```bash
+# on an HPC login node, from any existing checkout of this repository
+cd /home/ypan/BindCraft2/BindCraft2_deploy
+export XULAB_BC2_HOME=/home/ypan/BindCraft2/BindCraft2_cd19_dev
+export XULAB_PROJECT_ROOT=/project/yli4/ypan/bindcraft_cd19_dev
+
+bash lab/scripts/setup_dev_deployment.sh            # look first; creates nothing
+bash lab/scripts/setup_dev_deployment.sh --create   # mkdir + git clone
+```
+
+If the clone cannot reach GitHub from the HPC, copy the tree instead and skip
+only the clone:
+
+```bash
+mkdir -p /project/yli4/ypan/bindcraft_cd19_dev/{results,logs,cache/jax,tmp,targets}
+rsync -a --exclude '.git/' --exclude '__pycache__/' \
+  /home/ypan/BindCraft2/BindCraft2_deploy/ /home/ypan/BindCraft2/BindCraft2_cd19_dev/
+# then bring that copy up to this revision however the production tree was updated
+```
+
+#### Step 2 - preflight
+
+```bash
+cd /home/ypan/BindCraft2/BindCraft2_cd19_dev
+source lab/scripts/dev_env.sh          # prints every dev path and the AF2 parameters it found
+
+# if it printed "AF2 parameters NOT FOUND", locate the existing 5.3 GB set and export it.
+# It is never downloaded and never copied:
+#   export BINDCRAFT_AF2_PARAMS=/abs/path/to/dir/holding/params_model_1_multimer_v3.npz
+
+bash lab/scripts/hpc_preflight.sh      # must print RESULT: READY
+
+PY=/home/ypan/.conda/envs/bindcraft2/bin/python
+$PY lab/scripts/test_scfv_annotation.py       # expect 128/128, RESULT: PASS
+$PY lab/scripts/test_target_tools.py          # expect 155/155, RESULT: PASS
+$PY lab/scripts/test_deployment_isolation.py  # expect 118/118, RESULT: PASS
+$PY lab/scripts/test_notebook_cells.py        # expect RESULT: PASS
+```
+
+#### Step 3 - place the target, and confirm production is untouched
 
 ```bash
 cd /home/ypan/BindCraft2/BindCraft2_cd19_dev
 source lab/scripts/dev_env.sh
 
-# the example target, into the DEV targets root
 cp -n lab/targets/CD19_ECD.pdb "$XULAB_TARGETS/CD19_ECD.pdb"
-grep -c '^ATOM' "$XULAB_TARGETS/CD19_ECD.pdb"          # expect 1656
+grep -c '^ATOM' "$XULAB_TARGETS/CD19_ECD.pdb"      # expect 1656
+grep -m1 'Residues present' "$XULAB_TARGETS/CD19_ECD.pdb"   # expect 227
 
-# a settings file pointing at that copy; the notebook writes this for you, or:
-$PY - <<'JSON'
-import json, os, pathlib
-project = os.environ["XULAB_PROJECT_ROOT"]
-settings = {"modality": "scFv", "campaign_name": "cd19_scfv_dev",
-            "targets": [{"name": "hCD19_ECD",
-                         "target_path": f"{project}/targets/CD19_ECD.pdb",
-                         "chains": "A", "hotspots": "A162,A219,A220,A222"}],
-            "number_of_final_designs": 10, "max_trajectories": 500,
-            "workers_per_gpu": 1, "resume": True,
-            "project_folder": f"{project}/results/cd19_scfv_dev"}
-path = pathlib.Path("lab/configs/generated/cd19_scfv_dev.json")
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(settings, indent=2) + "\n")
-print(path)
-JSON
+# the settings file must name that copy and the dev results folder, and nothing else
+python -c "import json;s=json.load(open('lab/configs/cd19_scfv_discovery.json'));print(s['targets'][0]['target_path']);print(s['project_folder'])"
+# expect /project/yli4/ypan/bindcraft_cd19_dev/targets/CD19_ECD.pdb
+#        /project/yli4/ypan/bindcraft_cd19_dev/results/cd19_scfv_discovery
 
-# submit: the SAME unmodified launcher, with every path stated on the command line
+# production, which nothing above or below writes to
+ls -ld /project/yli4/ypan/bindcraft/results/pdl1_h200_smoke \
+       /project/yli4/ypan/bindcraft_backups/pdl1_20261123_172646
+ls /project/yli4/ypan/bindcraft/results
+```
+
+#### Step 4 - submit
+
+The launcher is the unmodified, proven one. Every path is stated on the command
+line, because an `sbatch` flag beats a directive inside the script, and there is
+no `srun` anywhere.
+
+```bash
+cd /home/ypan/BindCraft2/BindCraft2_cd19_dev
+source lab/scripts/dev_env.sh
 mkdir -p "$XULAB_LOGS"
+
 sbatch --parsable \
   --export=ALL,XULAB_BC2_HOME="$XULAB_BC2_HOME",XULAB_PROJECT_ROOT="$XULAB_PROJECT_ROOT",BINDCRAFT_AF2_PARAMS="$BINDCRAFT_AF2_PARAMS",BINDCRAFT_WEIGHTS="$BINDCRAFT_WEIGHTS" \
   --output="$XULAB_LOGS/xulab_bc2_%j.out" \
   --error="$XULAB_LOGS/xulab_bc2_%j.err" \
-  lab/slurm/run_bindcraft_h200.slurm lab/configs/generated/cd19_scfv_dev.json
+  lab/slurm/run_bindcraft_h200.slurm lab/configs/cd19_scfv_discovery.json
+# prints the job id, and nothing else
 # add --account=<account> if this site charges work to one
 # the launcher pins cmri-gpu05; another H200 node needs only --nodelist=<node>
-
-squeue -u "$USER"
-tail -f "$XULAB_LOGS"/xulab_bc2_<jobid>.out
 ```
 
-Or from the notebook, which builds exactly that command:
+From the notebook instead, which builds exactly that command:
+
+```bash
+cd /home/ypan/BindCraft2/BindCraft2_cd19_dev && source lab/scripts/dev_env.sh && jupyter lab
+#   cell 1 must print   deployment : cd19_dev
+#   cell 2  -> a file on the cluster: $XULAB_TARGETS/CD19_ECD.pdb, chain A,
+#             hotspots A162,A219,A220,A222
+#   cell 3  -> scFv, cd19_scfv_discovery, 10 designs, 500 trajectories, resume on
+#   cell 4  -> submit
+```
+
+#### Step 5 - monitor
+
+```bash
+JOB=<the job id sbatch printed>
+squeue -j "$JOB" -o '%T %M %L %R %N'
+tail -f "$XULAB_LOGS/xulab_bc2_$JOB.out"
+
+# the four lines that prove the allocation, in the launcher's own output
+grep -E 'xulab-bc2: (host|jax|device|gate passed)' "$XULAB_LOGS/xulab_bc2_$JOB.out"
+
+# progress
+ls "$XULAB_PROJECT_ROOT/results/cd19_scfv_discovery/1_Trajectories/" 2>/dev/null | head
+wc -l "$XULAB_PROJECT_ROOT/results/cd19_scfv_discovery/2_Refolded/!_Refolded.csv" 2>/dev/null
+ls "$XULAB_PROJECT_ROOT/results/cd19_scfv_discovery/3_Ranked/" 2>/dev/null
+
+# when it ends
+sacct -j "$JOB" -X --format=JobID,State,ExitCode,Elapsed,NodeList,ReqTRES
+```
+
+#### Step 6 - validate and read the results
 
 ```bash
 cd /home/ypan/BindCraft2/BindCraft2_cd19_dev
 source lab/scripts/dev_env.sh
-jupyter lab      # cell 1 prints "deployment: cd19_dev" and every dev path
+
+$PY lab/scripts/validate_outputs.py \
+  "$XULAB_PROJECT_ROOT/results/cd19_scfv_discovery" \
+  --slurm-log "$XULAB_LOGS/xulab_bc2_$JOB.out" \
+  --output "$XULAB_PROJECT_ROOT/results/cd19_scfv_discovery/validation.md"
+# exit 0 nothing failed, 1 at least one FAIL, 2 the folder was unreadable
 ```
 
-`resume: true` means the same command continues the same folder, which is how a
-500-trajectory budget spans more than one 08:00:00 allocation.
+Then in the notebook: cell 6 loads
+`/project/yli4/ypan/bindcraft_cd19_dev/results/cd19_scfv_discovery`, cell 7
+prints up to ten accepted candidates with VH/VL sequences, annotated loops and
+the Kabat HCDR3, cell 8 reviews them one at a time in 3D, cell 9 exports to
+`/project/yli4/ypan/bindcraft_cd19_dev/results/exports/cd19_scfv_discovery/`
+plus a zip, and cell 10 runs the audit above.
+
+#### Budget and expectations
+
+`max_trajectories: 500` with `resume: true` means **the submit command in step 4
+can be run again unchanged** and the campaign continues in the same folder. The
+launcher declares an 08:00:00 wall clock, so a 500-trajectory budget may need
+more than one submission; resuming is the supported way to do that.
+
+Ten accepted candidates is the **goal, not a guarantee**. A campaign that
+accepts fewer, or none, is an ordinary outcome and is reported as such: cell 7
+says how many were accepted and states that nothing was substituted to reach
+ten, and cell 6 shows the rejected candidates with the filters that rejected
+them. Nothing in this project relaxes a filter to reach a count.
 
 ---
 

@@ -7,6 +7,67 @@ commit `8c1a858fdc1bfc94c60846ff11a0d01c9aa44136` (`v1.0.4-4-g8c1a858`,
 The upstream license requires that modifications be marked. This file is that
 record.
 
+## 2026-11-24 (Phase 5a) - validation pass before the first CD19 run; feature freeze
+
+Feature development is frozen. This pass only validated what Phase 5 left and
+fixed the one thing that blocked running the CD19-scFv campaign in the isolated
+development deployment. No new capability, no refactoring, nothing added to the
+notebook's ten steps, and the SLURM launcher, conda environment and AI
+algorithms are untouched.
+
+### The blocker found and fixed
+
+`lab/configs/cd19_scfv_discovery.json` was committed in Phase 4 with the
+**production** project root in both of its paths:
+
+```
+target_path    /project/yli4/ypan/bindcraft/targets/CD19_ECD.pdb
+project_folder /project/yli4/ypan/bindcraft/results/cd19_scfv_discovery
+```
+
+Submitting it from the development deployment would have written a new campaign
+folder into the production results directory, beside the PD-L1 data. Phase 5
+built the isolation but did not repoint this file. Both paths now name
+`/project/yli4/ypan/bindcraft_cd19_dev`, and
+`lab/scripts/test_deployment_isolation.py` asserts it so it cannot regress.
+
+### Validated, not changed
+
+A static check of the campaign against the rules in `bindcraft/settings.py`,
+`bindcraft/protein_preparation.py` and `settings/modality/scFv.json`, reading the
+same files bindcraft reads: **36 checks, 0 failures** after the fix above.
+
+* All eight campaign keys are in `known_campaign_settings`; all four target keys
+  are in `TARGET_SETTING_NAMES`.
+* The target file holds exactly one chain (A, 227 residues, 21-277), no
+  heteroatom, no insertion code and no non-standard residue, and the config's
+  `chains: "A"` matches it.
+* All four hotspots are present in the file - `D162`, `P219`, `K220`, `P222` -
+  so none would be silently dropped. The chain-qualified `A162` form is what
+  `chain_qualified_residue_span` expects.
+* The scFv scaffold resolves and holds the two chains H and L the preset
+  declares; all 23 `mutate_positions` spans lie inside the scaffold's residue
+  ranges; no `copies` (required for a multi-chain scaffold) and no
+  `binder_lengths` (the scaffold decides) are set.
+* All six CDR loops have framework anchors on both sides, each unique in its
+  scaffold chain, so VH/VL identification and loop annotation can run.
+
+### Changed
+
+| File | Change |
+| --- | --- |
+| `lab/configs/cd19_scfv_discovery.json` | Both paths repointed from the production project root to `/project/yli4/ypan/bindcraft_cd19_dev`. Nothing else in the file changed. |
+| `lab/scripts/dev_env.sh` | `BINDCRAFT_WEIGHTS` - the one weight path the launcher creates with `mkdir -p` - moved from the production cache to the dev cache, so a dev run cannot write into production even if a future change tried to fetch a weight. The 5.3 GB parameter set is still not copied: the file now locates it read-only in the order the launcher searches and exports `BINDCRAFT_AF2_PARAMS`, printing what it found or saying plainly that it found nothing. |
+| `lab/scripts/test_deployment_isolation.py` | One new test asserting the committed CD19 campaign writes into the dev tree and carries the agreed parameters (scFv, 10 designs, 500 trajectories, 1 worker, resume, no copies, no binder_lengths). The weight-cache assertion flipped to require the dev cache. Its `dev_env.sh` parser now resolves nested `${VAR:-${OTHER}/x}` defaults, which the old one read wrongly. 102 -> 118 assertions. |
+| `README_XULAB.md` | §9.3 rewritten as the exact six-step sequence - deploy, preflight, place the target and confirm production is intact, submit, monitor, validate - using the committed settings file rather than generating one. §9's table and §9.1 updated for the weight-cache change. |
+| `lab/README.md`, `lab/notebooks/README.md` | Assertion counts. |
+
+### Still not done, and not claimed
+
+No campaign has been submitted. There is no SLURM job ID, no H200 execution
+evidence and no CD19 result, because there is no HPC access from the development
+machine. The development directories do not exist and nothing has been cloned.
+
 ## 2026-11-24 (Phase 5) - general-purpose target discovery, generic reporting, isolated dev deployment
 
 Phase 4 proved the pipeline on one antigen. This phase makes the deployment what

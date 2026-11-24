@@ -90,12 +90,13 @@ def dev_environment() -> dict:
             continue
         name, _, value = line[len("export "):].partition("=")
         value = value.strip().strip('"')
-        # Resolve ${VAR:-default} against what has been read so far.
+        # Resolve ${VAR:-default} against what has been read so far, innermost
+        # first, because a default may itself be a reference:
+        # BINDCRAFT_WEIGHTS="${BINDCRAFT_WEIGHTS:-${XULAB_CACHE}/bindcraft}".
         while "${" in value:
-            start = value.index("${")
-            end = value.index("}", start)
-            inner = value[start + 2:end]
-            reference, _, default = inner.partition(":-")
+            end = value.index("}")
+            start = value.rindex("${", 0, end)
+            reference, _, default = value[start + 2:end].partition(":-")
             value = value[:start] + (values.get(reference) or default) + value[end + 1:]
         values[name] = value
     return values
@@ -114,11 +115,19 @@ def test_env_file_is_internally_consistent() -> None:
         equal(values.get(name), expected, f"dev_env.sh sets {name} inside the dev project root")
     equal(values.get("JAX_COMPILATION_CACHE_DIR"), f"{DEV_PROJECT}/cache/jax",
           "the JAX cache is inside the dev project root")
-    # Shared on purpose, and shared is not the same as copied.
+    # The conda environment is shared, and shared is not the same as copied.
     check(values.get("XULAB_PYTHON", "").startswith("/home/ypan/.conda/envs/bindcraft2"),
           "the conda interpreter is shared, not duplicated")
-    check(PRODUCTION_PROJECT in values.get("BINDCRAFT_WEIGHTS", ""),
-          "the model weights are read from the shared cache, not copied")
+    # The writable weight cache must be in the dev tree: BINDCRAFT_WEIGHTS is the
+    # one weight path the launcher creates, so pointing it at production would let
+    # a dev run write there. The read-only parameter set is found, not copied.
+    equal(values.get("BINDCRAFT_WEIGHTS"), f"{DEV_PROJECT}/cache/bindcraft",
+          "the writable weight cache is inside the dev project root")
+    text = (REPOSITORY / "lab" / "scripts" / "dev_env.sh").read_text(encoding="utf-8")
+    check("never downloaded" in text,
+          "dev_env.sh states that the parameter set is never downloaded")
+    check("BINDCRAFT_AF2_PARAMS" in text,
+          "dev_env.sh locates the existing parameter set rather than copying one")
     for name, value in values.items():
         if name in ("XULAB_PYTHON", "BINDCRAFT_WEIGHTS", "XULAB_DEPLOYMENT"):
             continue
@@ -126,6 +135,40 @@ def test_env_file_is_internally_consistent() -> None:
               f"{name}={value} does not point inside the production project tree")
         check(value != PRODUCTION_SOURCE,
               f"{name}={value} is not the production source tree")
+
+
+def test_cd19_campaign_config_uses_the_dev_deployment() -> None:
+    """The committed CD19 campaign must write into the development tree.
+
+    This is the one thing a wrong path actually costs: a campaign that lands in
+    the production results directory beside the PD-L1 data. It is asserted here
+    so it cannot regress silently.
+    """
+    config = REPOSITORY / "lab" / "configs" / "cd19_scfv_discovery.json"
+    check(config.is_file(), "the CD19 campaign config exists")
+    if not config.is_file():
+        return
+    settings = json.loads(config.read_text(encoding="utf-8"))
+    equal(settings.get("project_folder"), f"{DEV_PROJECT}/results/cd19_scfv_discovery",
+          "the campaign writes its results into the dev project root")
+    targets = settings.get("targets") or []
+    equal(len(targets), 1, "the campaign names exactly one target")
+    for target in targets:
+        path = str(target.get("target_path", ""))
+        check(path.startswith(f"{DEV_PROJECT}/"),
+              f"the target path {path} is inside the dev project root")
+        check(not path.startswith(f"{PRODUCTION_PROJECT}/"),
+              f"the target path {path} is not inside the production project root")
+    # The campaign parameters the brief fixed, so a typo in them is caught here.
+    equal(settings.get("modality"), "scFv", "the campaign designs the scFv modality")
+    equal(settings.get("number_of_final_designs"), 10, "it asks for 10 final designs")
+    equal(settings.get("max_trajectories"), 500, "its initial budget is 500 trajectories")
+    equal(settings.get("workers_per_gpu"), 1, "it runs one worker per GPU")
+    equal(settings.get("resume"), True, "it resumes into the same folder")
+    check("copies" not in settings,
+          "it sets no copies, which a two-chain scaffold requires")
+    check("binder_lengths" not in settings,
+          "it sets no binder_lengths, which the scaffold decides")
 
 
 def test_helper_paths_follow_the_deployment() -> None:

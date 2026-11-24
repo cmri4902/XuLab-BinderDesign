@@ -45,13 +45,33 @@ export XULAB_CACHE="${XULAB_PROJECT_ROOT}/cache"
 export XULAB_TMP="${XULAB_PROJECT_ROOT}/tmp"
 export XULAB_TARGETS="${XULAB_PROJECT_ROOT}/targets"
 
-# Shared, not copied: the same interpreter and the same model weights the
-# production deployment uses. A campaign only reads them.
+# Shared, not copied: the same conda environment the production deployment uses.
+# A campaign only executes it.
 export XULAB_PYTHON="${XULAB_PYTHON:-/home/ypan/.conda/envs/bindcraft2/bin/python}"
-export BINDCRAFT_WEIGHTS="${BINDCRAFT_WEIGHTS:-/project/yli4/ypan/bindcraft/cache/bindcraft}"
-# Point this at the directory holding params_<model>.npz once it is confirmed, so
-# neither the launcher nor the notebook has to search for it:
-#   export BINDCRAFT_AF2_PARAMS=/abs/path/to/alphafold
+
+# The writable weight cache is in the DEV tree, so nothing a dev run does can
+# write into the production cache. The 5.3 GB AlphaFold parameter set is NOT
+# copied: BINDCRAFT_AF2_PARAMS below points at wherever it already is, and the
+# launcher only ever reads from it. It never downloads - it fails instead.
+export BINDCRAFT_WEIGHTS="${BINDCRAFT_WEIGHTS:-${XULAB_CACHE}/bindcraft}"
+
+# Find the existing parameter set read-only, in the order the launcher searches,
+# and export it so neither the launcher nor the notebook has to search again.
+# Set BINDCRAFT_AF2_PARAMS yourself to skip this entirely.
+if [[ -z ${BINDCRAFT_AF2_PARAMS:-} ]]; then
+  for xulab_candidate in \
+      "${HOME}/.cache/bindcraft/alphafold" \
+      "/project/yli4/ypan/bindcraft/cache/bindcraft/alphafold" \
+      "${XULAB_CACHE}/bindcraft/alphafold" \
+      "${XULAB_BC2_HOME}/bindcraft/weights/alphafold"; do
+    if compgen -G "${xulab_candidate}/params_*.npz" > /dev/null \
+       || compgen -G "${xulab_candidate}/params/params_*.npz" > /dev/null; then
+      export BINDCRAFT_AF2_PARAMS="${xulab_candidate}"
+      break
+    fi
+  done
+  unset xulab_candidate
+fi
 
 # JAX compilation cache in the dev tree, so a dev run cannot invalidate or grow
 # the production cache.
@@ -66,8 +86,10 @@ xulab: DEVELOPMENT deployment selected in this shell
   results            ${XULAB_RESULTS}
   logs               ${XULAB_LOGS}
   targets            ${XULAB_TARGETS}
-  shared (read only) ${XULAB_PYTHON}
-                     ${BINDCRAFT_WEIGHTS}
+  weight cache       ${BINDCRAFT_WEIGHTS}  (writable, in the dev tree)
+  AF2 parameters     ${BINDCRAFT_AF2_PARAMS:-NOT FOUND - export BINDCRAFT_AF2_PARAMS yourself}
+                     (read only, never copied, never downloaded)
+  shared environment ${XULAB_PYTHON}
   production tree    /home/ypan/BindCraft2/BindCraft2_deploy  (NOT touched)
                      /project/yli4/ypan/bindcraft             (NOT touched)
 Open a new shell, or source nothing, to go back to the production deployment.

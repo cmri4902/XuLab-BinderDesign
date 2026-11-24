@@ -59,7 +59,7 @@ which needs a network, a GPU or an allocation:
 ```bash
 python lab/scripts/test_scfv_annotation.py      # 128 assertions, 10 tests
 python lab/scripts/test_target_tools.py         # 155 assertions, 13 tests
-python lab/scripts/test_deployment_isolation.py # 102 assertions, 6 tests
+python lab/scripts/test_deployment_isolation.py # 118 assertions, 7 tests
 python lab/scripts/test_notebook_cells.py       # cells 2, 3, 7, 8, 9 and every callback
 ```
 
