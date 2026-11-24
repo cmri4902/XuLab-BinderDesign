@@ -29,8 +29,8 @@ jupyter lab            # or the institutional Jupyter/Workbench launcher
 ## The ten steps
 
 1. environment report (paths, interpreter, `sbatch`, AlphaFold parameters, bundled checkpoints, which `bindcraft` the interpreter imports). Makes **no GPU claim**: a Jupyter node is not the batch allocation.
-2. target: a shipped preset or your own PDB/mmCIF/FASTA on the cluster, with chains, hotspots and coldspots. Several targets make it a multi-target campaign.
-3. binder and campaign: binder type (10 modalities), lengths, oligomer copies, property presets, designs wanted, trajectory budget, workers per GPU. Writes a settings file to `lab/configs/generated/`.
+2. target, six ways: search RCSB by protein name, UniProt accession or PDB ID; enter a PDB ID; upload a .pdb/.cif/.fasta; paste a sequence; point at a file on the cluster; or pick a shipped preset. The form reports the entry's title, method and resolution, every entity's chain, length, organism and UniProt accession, the residue range present, the ordered and absent segments, the engineered mutations and expression tags the file declares, and the SIFTS mapping to the reference sequence - then waits for you to name the antigen chain. Nothing is pre-selected when a file holds more than one polymer chain. Hotspots and coldspots are optional. The prepared target and the settings entry are written for you. Several targets make it a multi-target campaign.
+3. binder and campaign: binder type (10 modalities, opening on scFv as the default example), lengths, oligomer copies, property presets, designs wanted, trajectory budget, workers per GPU, resume. Writes a settings file to `lab/configs/generated/` of the source tree in use.
 4. submit to SLURM, with an optional account, the parameter directory, and a dry-run switch.
 5. job status (`squeue`, then `sacct`), log tail, cancel.
 6. load any campaign - finished or still running - and read the ranked, candidate and attempt tables, with the filters that rejected candidates.
@@ -53,16 +53,20 @@ jupyter lab            # or the institutional Jupyter/Workbench launcher
 every widget callback fired, including a dry-run submission, a campaign load, an export with zip,
 and a validator run). `nbformat` validates the notebook.
 
-The scFv layer behind cells 7-9 has its own two runnable test scripts, both passing:
+The target step and the scFv layer have their own runnable test scripts, all passing, none of
+which needs a network, a GPU or an allocation:
 
 ```bash
-python lab/scripts/test_scfv_annotation.py   # 127 assertions, 10 tests
-python lab/scripts/test_notebook_cells.py    # cells 7-9 and every callback, 4 fixture campaigns
+python lab/scripts/test_scfv_annotation.py      # 128 assertions, 10 tests
+python lab/scripts/test_target_tools.py         # 155 assertions, 13 tests
+python lab/scripts/test_deployment_isolation.py # 102 assertions, 6 tests
+python lab/scripts/test_notebook_cells.py       # cells 2, 3, 7, 8, 9 and every callback
 ```
 
 They cover a campaign with a design whose structure file is missing, a de novo binder campaign
-(to prove the PD-L1 path is unaffected), a campaign with nothing accepted, and no campaign
-loaded at all, plus every path where annotation refuses to guess.
+(to prove the PD-L1 path is unaffected), a campaign with nothing accepted, no campaign loaded at
+all, every path where annotation or chain selection refuses to guess, both structure formats, an
+RCSB outage, and the isolation of the development deployment.
 
 **Not tested:** anything that needs the cluster - a real `sbatch`, `squeue`/`sacct` output, an H200
 allocation, a real campaign, or `py3Dmol` rendering inside institutional Jupyter. No GPU run is

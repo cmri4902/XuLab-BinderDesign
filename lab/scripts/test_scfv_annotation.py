@@ -222,8 +222,17 @@ def test_paratope_split() -> None:
 # campaign fixtures
 # --------------------------------------------------------------------------- #
 
-def write_fixture(root: Path, name: str, modality: str, designs: list) -> Path:
-    """A minimal but realistically shaped campaign folder."""
+TARGET_SEQUENCE = "EEPLVVK"
+
+
+def write_fixture(root: Path, name: str, modality: str, designs: list,
+                  with_target_file: bool = False) -> Path:
+    """A minimal but realistically shaped campaign folder.
+
+    `with_target_file` also writes a real target .pdb and points the recorded
+    settings at it, which is how the viewer identifies a target chain positively
+    instead of naming it by elimination.
+    """
     folder = root / name
     (folder / "3_Ranked").mkdir(parents=True, exist_ok=True)
     (folder / "2_Refolded").mkdir(parents=True, exist_ok=True)
@@ -259,9 +268,18 @@ def write_fixture(root: Path, name: str, modality: str, designs: list) -> Path:
         writer.writerow({"design": "rejected_2", "settings_modality": modality,
                          "outcome": "rejected", "failed_filters": "Backbone_Clashes",
                          "i_pTM": "0.55", "pLDDT": "0.71"})
+    settings = {"modality": modality, "campaign_name": name}
+    if with_target_file:
+        target = folder / "target.pdb"
+        three_letter = {code: name for name, code in hpc.STANDARD_RESIDUES.items()}
+        lines = [f"ATOM  {number:>5}  CA  {three_letter[code]} A{number:>4}    "
+                 f"{float(number):>8.3f}{0.0:>8.3f}{0.0:>8.3f}  1.00 85.00           C"
+                 for number, code in enumerate(TARGET_SEQUENCE, start=1)]
+        target.write_text("\n".join(lines) + "\nEND\n", encoding="utf-8", newline="\n")
+        settings["targets"] = [{"name": "fixture_target", "target_path": str(target),
+                                "chains": "A"}]
     (folder / "campaign_metadata.json").write_text(
-        json.dumps({"version": "test", "settings": {"modality": modality,
-                                                    "campaign_name": name},
+        json.dumps({"version": "test", "settings": settings,
                     "metadata": {"settings_modality": modality}}, indent=2),
         encoding="utf-8", newline="\n")
 
@@ -343,8 +361,10 @@ def test_top_designs_on_fixture() -> None:
         reference = hpc.scaffold_reference("scFv")
         labelled = hpc.structure_domains(accepted[0]["path"], reference)
         equal(sorted((chain["chain"], chain["domain"]) for chain in labelled),
-              [("A", "target / other"), ("B", "VH"), ("C", "VL")],
-              "the viewer labels the structure chains CD19 / VH / VL")
+              [("A", "target or binder (not determined)"), ("B", "VH"), ("C", "VL")],
+              "with no readable target file, chain A is not claimed to be the target")
+        check(all(chain["evidence"] for chain in labelled),
+              "every chain label carries the evidence it was given on")
 
         export = hpc.export_campaign(campaign, destination=root / "export", limit=10)
         for expected in ("cd19_scfv_discovery_VH_VL.fasta", "cd19_scfv_discovery_CDRs.csv",
@@ -445,7 +465,8 @@ def test_binder_campaign_is_untouched() -> None:
         accepted = hpc.accepted_designs(campaign, limit=10)
         equal(len(accepted), 1, "the viewer offers the one accepted design")
         labelled = hpc.structure_domains(accepted[0]["path"], None)
-        equal([chain["domain"] for chain in labelled], ["target / other", "target / other"],
+        equal([chain["domain"] for chain in labelled],
+              ["target or binder (not determined)", "target or binder (not determined)"],
               "without a reference no chain is called a variable domain")
 
         export = hpc.export_campaign(campaign, destination=root / "export", limit=10)

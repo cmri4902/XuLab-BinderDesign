@@ -121,14 +121,30 @@ consensus above is the site itself.
 
 ## Reproducing this file
 
+This target is the platform's **default example**, not a special case: it was
+built with the same general-purpose tool any other target goes through.
+
 ```bash
-# needs internet access; the compute nodes do not have it, which is why the
-# prepared file is committed to the repository
-curl -O https://files.rcsb.org/download/6AL5.pdb
-python lab/scripts/prepare_cd19_target.py --source 6AL5.pdb \
-    --output lab/targets/CD19_ECD.pdb --report
+# look first - this refuses to choose a chain in a three-chain complex
+python lab/scripts/prepare_target.py --entry 6AL5 --describe
+
+# then prepare it
+python lab/scripts/prepare_target.py --entry 6AL5 --chain A \
+    --first 21 --last 277 --name hCD19_ECD \
+    --output lab/targets/CD19_ECD.pdb --contacts
 ```
 
-The `--report` output is the B43 epitope table quoted above. The 7JIC numbers were
-read from `https://files.rcsb.org/download/7JIC.cif` with the same 4.0 Å
+`--entry` needs internet access, which the HPC compute nodes do not have; that is
+why the prepared file is committed to the repository. With the entry already
+downloaded, `--source 6AL5.pdb` replaces `--entry 6AL5` and needs no network.
+
+The `--contacts` output is the B43 epitope table quoted above. The 7JIC numbers
+were read from `https://files.rcsb.org/download/7JIC.cif` with the same 4.0 Å
 heavy-atom criterion.
+
+The file's own `REMARK 999` header carries the same provenance: the entry, the
+method and resolution, the entity, the selection, the residues present, the
+ordered and absent segments, everything removed, each `SEQADV` the source
+declares, and the SIFTS mapping from the entity's numbering to UniProt P15391.
+`python lab/scripts/prepare_target.py --source lab/targets/CD19_ECD.pdb
+--describe` reads it back.

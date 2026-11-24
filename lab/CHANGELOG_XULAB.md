@@ -7,6 +7,66 @@ commit `8c1a858fdc1bfc94c60846ff11a0d01c9aa44136` (`v1.0.4-4-g8c1a858`,
 The upstream license requires that modifications be marked. This file is that
 record.
 
+## 2026-11-24 (Phase 5) - general-purpose target discovery, generic reporting, isolated dev deployment
+
+Phase 4 proved the pipeline on one antigen. This phase makes the deployment what
+it was meant to be: a binder discovery platform for any protein, with CD19 and
+scFv demoted from "the campaign" to "the default example". It also gives
+development its own HPC deployment, so no future change can reach the production
+tree or the PD-L1 results.
+
+The execution path is still untouched: `lab/slurm/run_bindcraft_h200.slurm` is
+byte-identical (asserted by a test), no `srun` was introduced, the H200 and
+`sbatch` settings are unchanged, no dependency was added or reinstalled, no
+AlphaFold or ProteinMPNN model or weight was touched, and no upstream file was
+edited. No campaign was submitted: there is no HPC access from the development
+machine, so there is no job ID.
+
+### Added
+
+| File | What it does |
+| --- | --- |
+| `lab/scripts/prepare_target.py` | The general-purpose target builder, replacing the CD19-specific `prepare_cd19_target.py`. `--search` queries RCSB by protein name, UniProt accession or PDB ID; `--entry`/`--source` with `--describe` prints what a structure contains without writing anything; `--chain`, `--first`, `--last` select; `--contacts` reports the interface the source deposition itself contains. It is the command-line face of the same helper functions the notebook's target step uses, so both routes produce the same file. Standard library only. |
+| `lab/scripts/dev_env.sh` | Sourced to point a shell at the isolated development deployment (`XULAB_DEPLOYMENT`, `XULAB_BC2_HOME`, `XULAB_PROJECT_ROOT` and every derived root). The conda environment and the AlphaFold/ProteinMPNN weights stay shared and read-only - copying 5.3 GB of parameters would be waste. Sourcing nothing leaves the shell on production. |
+| `lab/scripts/setup_dev_deployment.sh` | Creates the development project directories and clones the development source tree. Reports without acting unless given `--create`; refuses outright, exit 2, if either development path is configured to be a production path; compares the development launcher against the production one byte for byte; copies no environment and no weights. |
+| `lab/scripts/test_target_tools.py` | 155 assertions over the target layer: format detection, PDB and mmCIF parsing of the same fixture to the same result, `SEQADV` and `_struct_ref_seq_dif`, `REMARK 465` and `_pdbx_unobs_or_zero_occ_residues`, the chain-ambiguity refusal, preparation including the removal report and the provenance header, the refusal to write mmCIF data that does not fit PDB columns, the committed example target still being what its record claims, the geometry notes refusing to claim accessibility, FASTA parsing and writing, upload handling including a path-traversal name and a refused extension, and RCSB search routing, entry reporting, download fallback and offline behaviour - all through a stub opener, so there is no network. |
+| `lab/scripts/test_deployment_isolation.py` | 102 assertions that a development deployment cannot reach production: `dev_env.sh` is parsed rather than restated, the helper is loaded under each deployment's variables and all thirteen derived paths checked, a real `sbatch` command is built with `dry_run=True` and must name neither production tree, the launcher is asserted unmodified and `srun`-free, and the setup script's refusal of production paths is exercised. Submits nothing. |
+
+### Changed
+
+| File | Change |
+| --- | --- |
+| `lab/notebooks/xulab_hpc.py` | Two new sections added (`1b` structure files and target preparation, `1c` RCSB lookup) and four existing functions changed. New: `structure_format`, `structure_atoms`, `residue_spans`, `span_text`, `sequence_differences`, `declared_unobserved`, `chain_inventory`, `polymer_chains`, `resolve_chain`, `geometry_notes`, `describe_structure`, `read_fasta`, `prepare_target`, `write_fasta_target`, `save_upload`, `looks_like_pdb_id`, `looks_like_uniprot`, `rcsb_search`, `rcsb_entry_report`, `rcsb_download`, `entity_of_chain`, `numbering_mapping`, `campaign_target_sequences`. Every RCSB function returns `(data, error)` and never raises, because the compute nodes have no internet access, and takes an `opener` so the tests run without a network. `resolve_chain` returns a refusal, never a guess, when a file holds several polymer chains. `geometry_notes` measures geometry and states explicitly that cell-surface accessibility is **not established** by coordinates. Changed: `TARGETS_ROOT` and `DEPLOYMENT` added to the paths; `environment_report` reports the deployment and the targets root (the latter as a WARN when absent, not a FAIL, since the target step creates it); `structure_domains` now labels chains on evidence - a sequence match against the campaign's own target file, then the scaffold framework anchors - and returns the evidence with each label instead of calling everything `target / other`; `submit_campaign` states `XULAB_BC2_HOME`, `XULAB_PROJECT_ROOT`, `BINDCRAFT_WEIGHTS` and `--output`/`--error` on every submission, so a deployment's paths are never inherited or defaulted; `Submission` records its deployment and source tree. |
+| `lab/notebooks/xulab_bindcraft_h200.ipynb` | Cells 1, 2, 3 and the closing notes rewritten; cells 7, 8 and 9 reworded only. Cell 1 prints which deployment the kernel is driving before anything else. Cell 2 becomes the six-source target step described above, with the identity, coverage, mutation, unplaced-residue and numbering-mapping report, optional hotspots and coldspots, and an optional geometry report. Cell 3 opens on scFv, 10 designs, 500 trajectories and resume, and gained a resume checkbox. Cells 7 and 8 lost their CD19-specific wording: the report says "predicted target contacts" and the viewer labels the target, the binder, VH and VL. |
+| `lab/scripts/test_notebook_cells.py` | Now covers cells 2 and 3 as well: every one of the six target sources lays out, the RCSB routes run against a stub, an ambiguous chain is refused rather than added, a pasted sequence and a shipped preset both add entries, and the written settings JSON is asserted field by field. |
+| `lab/targets/CD19_ECD.pdb` | Regenerated through the general-purpose builder, so there is one code path rather than two. Identical selection - chain A, 21-277, 227 residues, 1656 atoms - with a fuller `REMARK 999` header: the RCSB entry title, method and resolution, the entity, every `SEQADV` the source declares, and the SIFTS mapping `entity 1-257 -> UniProt P15391 21-277`. |
+| `lab/targets/CD19_ECD.md` | Reproduction commands updated to the general tool, and the file is now described as the platform's default example rather than its one target. |
+| `README_XULAB.md` | §8 rewritten as "The binder discovery platform": the six target sources, what is reported before anything is committed, the accessibility position, the default example target, campaign settings, and how to read the results. New §9, the isolated development deployment: the full path comparison, how the separation is enforced without editing the launcher, and the exact setup and submission commands. Licensing becomes §10. Status rows rewritten, including which RCSB behaviour was verified against the live API and on what date. |
+| `lab/README.md`, `lab/notebooks/README.md` | Rows and step descriptions for the new files and the rewritten steps, with the current assertion counts. |
+
+### Removed
+
+| File | Why |
+| --- | --- |
+| `lab/scripts/prepare_cd19_target.py` | Superseded by `lab/scripts/prepare_target.py`, which does the same thing for any antigen and reproduces this script's output. Keeping a CD19-named script in a general-purpose platform would have been misleading. |
+
+### Deliberately not done
+
+* The SLURM launcher was not edited, not even to make the development deployment
+  work. It already reads `XULAB_BC2_HOME` and `XULAB_PROJECT_ROOT` from the
+  environment, and an `sbatch` flag beats a directive in the script, so stating
+  the log paths at submission time was enough. A test asserts the file is
+  unmodified.
+* No conda environment and no model weights were copied for the development
+  deployment. They are shared, read-only.
+* No `srun`, anywhere.
+* No change to the CDR spans, the filter set, the losses, the models, the GPU
+  settings or the environment.
+* `min_iptm_final` still not relaxed. Ten accepted designs is a goal, not a
+  target to be reached by moving the bar.
+* No accessibility claim from coordinates. The geometry report measures what it
+  can and names what it cannot establish.
+
 ## 2026-11-24 (Phase 4) - CD19 scFv discovery campaign, Top 10 report, individual 3D viewer
 
 A second campaign on the deployment the PD-L1 smoke test proved, plus the two

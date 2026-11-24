@@ -46,6 +46,17 @@ LOGS_ROOT = Path(os.environ.get("XULAB_LOGS", str(PROJECT_ROOT / "logs")))
 CACHE_ROOT = Path(os.environ.get("XULAB_CACHE", str(PROJECT_ROOT / "cache")))
 TMP_ROOT = Path(os.environ.get("XULAB_TMP", str(PROJECT_ROOT / "tmp")))
 CONDA_PYTHON = Path(os.environ.get("XULAB_PYTHON", "/home/ypan/.conda/envs/bindcraft2/bin/python"))
+# Prepared target files, kept in project storage beside the results that cite
+# them, so a target survives a source replacement and is reusable by later
+# campaigns. Uploads and downloads land in subdirectories of it.
+TARGETS_ROOT = Path(os.environ.get("XULAB_TARGETS", str(PROJECT_ROOT / "targets")))
+
+# A free-text label for which deployment this process is driving. It is printed
+# everywhere a path is printed, because the one mistake that costs real data is
+# running a development campaign against the production project root. It is only
+# a label: the paths above are what actually decide, and they come from the
+# XULAB_* variables, never from this string.
+DEPLOYMENT = os.environ.get("XULAB_DEPLOYMENT", "").strip() or "default"
 
 SLURM_SCRIPT = SOURCE_TREE / "lab" / "slurm" / "run_bindcraft_h200.slurm"
 VALIDATOR = SOURCE_TREE / "lab" / "scripts" / "validate_outputs.py"
@@ -182,6 +193,7 @@ def environment_report() -> list[tuple[str, str, str]]:
     """
     rows: list[tuple[str, str, str]] = []
 
+    rows.append(("deployment", "PASS", f"{DEPLOYMENT}  (set XULAB_DEPLOYMENT to label it)"))
     rows.append(("source tree", "PASS" if (SOURCE_TREE / "bindcraft" / "__init__.py").is_file()
                  else "FAIL", str(SOURCE_TREE)))
     rows.append(("slurm launcher", "PASS" if SLURM_SCRIPT.is_file() else "FAIL", str(SLURM_SCRIPT)))
@@ -195,6 +207,15 @@ def environment_report() -> list[tuple[str, str, str]]:
             rows.append((label, "FAIL", f"not writable: {directory}"))
         else:
             rows.append((label, "PASS", str(directory)))
+
+    # The targets root is created on demand by the target step, so its absence is
+    # not a reason to refuse a submission: an existing target elsewhere still works.
+    if TARGETS_ROOT.is_dir():
+        rows.append(("targets root", "PASS" if os.access(TARGETS_ROOT, os.W_OK) else "WARN",
+                     str(TARGETS_ROOT)))
+    else:
+        rows.append(("targets root", "WARN", f"{TARGETS_ROOT} does not exist yet; the target "
+                     "step creates it when it prepares a target"))
 
     rows.append(("conda interpreter", "PASS" if os.access(CONDA_PYTHON, os.X_OK) else "FAIL",
                  str(CONDA_PYTHON)))
@@ -240,6 +261,928 @@ def imported_bindcraft_path() -> tuple[str, str]:
     inside = str(SOURCE_TREE.resolve()) in module
     return ("PASS" if inside else "FAIL"),  module + ("" if inside else
                                                       f"  <- OUTSIDE {SOURCE_TREE}")
+
+
+# --------------------------------------------------------------------------- #
+# 1b. structure files: reading, describing and preparing any target
+#
+# A binder campaign needs one thing from a structure: the antigen's own chain,
+# with nothing else in the file. This section does that for any protein, not for
+# one particular antigen. It reads PDB and mmCIF, reports what the file actually
+# contains - identity, coverage, engineered differences, unplaced residues and
+# how its numbering maps to a reference sequence - and writes the selection out
+# with a provenance header.
+#
+# Three rules are enforced here rather than left to the caller:
+#   * a chain is never picked for the user when the choice is ambiguous;
+#   * nothing is modelled, mutated, renumbered or filled in;
+#   * no claim is made about whether an epitope is reachable on a cell. The
+#     coordinates of a soluble fragment cannot answer that, so this code reports
+#     geometry and names what the geometry does not establish.
+# --------------------------------------------------------------------------- #
+
+RCSB_FILES = "https://files.rcsb.org/download"
+RCSB_DATA = "https://data.rcsb.org/rest/v1/core"
+RCSB_SEARCH = "https://search.rcsb.org/rcsbsearch/v2/query"
+NETWORK_TIMEOUT = 30
+
+# Residues that are polymer, so a selection keeps them, as three-letter codes.
+# Everything else in a coordinate file - ligands, glycans, ions, water, modified
+# residues - is a heteroatom and is reported and dropped rather than guessed at.
+STANDARD_RESIDUES = {"ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C", "GLN": "Q",
+                     "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I", "LEU": "L", "LYS": "K",
+                     "MET": "M", "PHE": "F", "PRO": "P", "SER": "S", "THR": "T", "TRP": "W",
+                     "TYR": "Y", "VAL": "V"}
+ONE_TO_THREE = {code: name for name, code in STANDARD_RESIDUES.items()}
+
+
+def structure_format(path) -> str:
+    """"pdb", "cif", "fasta" or "" - decided by extension, then by content.
+
+    A path that is not a readable file has no format: an extension alone is not
+    taken as evidence about a file that is not there.
+    """
+    if not Path(path).is_file():
+        return ""
+    suffix = Path(path).suffix.lower()
+    if suffix in (".pdb", ".ent"):
+        return "pdb"
+    if suffix in (".cif", ".mmcif"):
+        return "cif"
+    if suffix in (".fasta", ".fa", ".faa", ".seq"):
+        return "fasta"
+    try:
+        head = Path(path).read_text(encoding="utf-8", errors="replace")[:4096]
+    except OSError:
+        return ""
+    if head.lstrip().startswith(">"):
+        return "fasta"
+    if "_atom_site." in head or head.lstrip().startswith("data_"):
+        return "cif"
+    if head.startswith(("HEADER", "ATOM  ", "HETATM", "REMARK", "TITLE")):
+        return "pdb"
+    return ""
+
+
+def _pdb_atom(line: str) -> dict | None:
+    try:
+        return {"record": line[:6].strip(), "name": line[12:16].strip(), "altloc": line[16],
+                "residue": line[17:20].strip(), "chain": line[21].strip() or " ",
+                "number": int(line[22:26]), "insertion": line[26].strip(),
+                "x": float(line[30:38]), "y": float(line[38:46]), "z": float(line[46:54]),
+                "occupancy": line[54:60].strip(), "bfactor": line[60:66].strip(),
+                "element": line[76:78].strip()}
+    except (ValueError, IndexError):
+        return None
+
+
+def _cif_atoms(text: str) -> list:
+    headers, atoms, in_loop = [], [], False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("_atom_site."):
+            headers.append(stripped.split(".", 1)[1])
+            in_loop = True
+            continue
+        if not in_loop:
+            continue
+        if stripped.startswith(("ATOM", "HETATM")):
+            fields = stripped.split()
+            if len(fields) < len(headers):
+                continue
+            field = dict(zip(headers, fields))
+
+            def value(*names, default=""):
+                for name in names:
+                    if field.get(name) not in (None, "", "?", "."):
+                        return field[name]
+                return default
+
+            try:
+                number = int(value("auth_seq_id", "label_seq_id", default="0"))
+            except ValueError:
+                continue
+            try:
+                coordinates = (float(field["Cartn_x"]), float(field["Cartn_y"]),
+                               float(field["Cartn_z"]))
+            except (KeyError, ValueError):
+                continue
+            atoms.append({"record": fields[0],
+                          "name": value("label_atom_id", "auth_atom_id"),
+                          "altloc": value("label_alt_id", default=" "),
+                          "residue": value("auth_comp_id", "label_comp_id"),
+                          "chain": value("auth_asym_id", "label_asym_id", default=" "),
+                          "number": number,
+                          "insertion": value("pdbx_PDB_ins_code", default=""),
+                          "x": coordinates[0], "y": coordinates[1], "z": coordinates[2],
+                          "occupancy": value("occupancy", default="1.00"),
+                          "bfactor": value("B_iso_or_equiv", default="0.00"),
+                          "element": value("type_symbol")})
+        elif stripped and not stripped.startswith(("#", "loop_", "_", "data_")):
+            in_loop = False
+    return atoms
+
+
+def structure_atoms(path) -> list:
+    """Every atom of the first model, from a PDB or mmCIF file.
+
+    Returns [] for an unreadable file or a format this cannot parse, so callers
+    report "could not read" rather than treating emptiness as "no atoms".
+    """
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    kind = structure_format(path)
+    if kind == "cif":
+        return _cif_atoms(text)
+    if kind != "pdb":
+        return []
+    atoms = []
+    for line in text.splitlines():
+        if line.startswith("ENDMDL"):
+            break
+        if line.startswith(("ATOM  ", "HETATM")):
+            atom = _pdb_atom(line)
+            if atom:
+                atoms.append(atom)
+    return atoms
+
+
+def residue_spans(numbers) -> list:
+    """Contiguous runs in a sorted iterable of residue numbers."""
+    spans: list = []
+    for number in sorted(numbers):
+        if spans and number == spans[-1][1] + 1:
+            spans[-1] = (spans[-1][0], number)
+        else:
+            spans.append((number, number))
+    return spans
+
+
+def span_text(spans) -> str:
+    return ", ".join(f"{start}-{stop}" if start != stop else str(start)
+                     for start, stop in spans) or "none"
+
+
+def sequence_differences(path) -> list:
+    """Engineered mutations and expression tags the file itself declares.
+
+    PDB `SEQADV` records and mmCIF `_struct_ref_seq_dif` both say where the
+    deposited construct differs from its reference sequence. This reads them as
+    written; it never infers a mutation by comparing sequences.
+    """
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    found: list = []
+    if structure_format(path) == "pdb":
+        for line in text.splitlines():
+            if not line.startswith("SEQADV"):
+                continue
+            found.append({"chain": line[16:17].strip(), "residue": line[12:15].strip(),
+                          "number": line[18:22].strip(),
+                          "database": line[24:28].strip(), "accession": line[29:38].strip(),
+                          "reference_residue": line[39:42].strip(),
+                          "reference_number": line[43:48].strip(),
+                          "note": line[49:].strip()})
+        return found
+    # mmCIF: the loop is short, so it is read by header name like the atom loop.
+    headers, in_loop = [], False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("_struct_ref_seq_dif."):
+            headers.append(stripped.split(".", 1)[1])
+            in_loop = True
+            continue
+        if not in_loop:
+            continue
+        if stripped.startswith(("#", "loop_", "_", "data_")) or not stripped:
+            if headers:
+                in_loop = False
+            continue
+        fields = _cif_row(stripped)
+        if len(fields) < len(headers):
+            continue
+        field = dict(zip(headers, fields))
+        found.append({"chain": field.get("pdbx_pdb_strand_id", field.get("pdbx_PDB_strand_id", "")),
+                      "residue": field.get("mon_id", ""),
+                      "number": field.get("pdbx_auth_seq_num", field.get("seq_num", "")),
+                      "database": field.get("pdbx_seq_db_name", ""),
+                      "accession": field.get("pdbx_seq_db_accession_code", ""),
+                      "reference_residue": field.get("db_mon_id", ""),
+                      "reference_number": field.get("pdbx_seq_db_seq_num", ""),
+                      "note": field.get("details", "").strip("'\"")})
+    return found
+
+
+def _cif_row(line: str) -> list:
+    """Split one mmCIF loop row, honouring single-quoted fields."""
+    fields, current, quote = [], "", ""
+    for character in line:
+        if quote:
+            if character == quote:
+                quote = ""
+            else:
+                current += character
+        elif character in "'\"":
+            quote = character
+        elif character.isspace():
+            if current:
+                fields.append(current)
+                current = ""
+        else:
+            current += character
+    if current:
+        fields.append(current)
+    return fields
+
+
+def declared_unobserved(path) -> dict:
+    """{chain: [residue numbers]} the file declares as not located.
+
+    PDB `REMARK 465` and mmCIF `_pdbx_unobs_or_zero_occ_residues`. This is what
+    the depositors said; `chain_inventory` separately reports the gaps actually
+    present in the coordinates, and the two are shown side by side rather than
+    merged, because a disagreement between them is information.
+    """
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    missing: dict = {}
+    if structure_format(path) == "pdb":
+        for line in text.splitlines():
+            if not line.startswith("REMARK 465"):
+                continue
+            fields = line[10:].split()
+            if len(fields) == 3 and len(fields[0]) == 3 and fields[0].isalpha():
+                try:
+                    missing.setdefault(fields[1], []).append(int(fields[2]))
+                except ValueError:
+                    continue
+        return missing
+    headers, in_loop = [], False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("_pdbx_unobs_or_zero_occ_residues."):
+            headers.append(stripped.split(".", 1)[1])
+            in_loop = True
+            continue
+        if not in_loop:
+            continue
+        if stripped.startswith(("#", "loop_", "_", "data_")) or not stripped:
+            if headers:
+                in_loop = False
+            continue
+        field = dict(zip(headers, _cif_row(stripped)))
+        chain = field.get("auth_asym_id") or field.get("label_asym_id") or ""
+        try:
+            missing.setdefault(chain, []).append(int(field.get("auth_seq_id", "")))
+        except ValueError:
+            continue
+    return missing
+
+
+def chain_inventory(path) -> list:
+    """What each polymer chain of a structure file actually contains.
+
+    One entry per chain: residue count, observed range, the contiguous segments,
+    the gaps inside the range, the one-letter sequence of what is present, the
+    heteroatom residues sitting on that chain, and any insertion codes. This is
+    the evidence a chain choice is made on.
+    """
+    atoms = structure_atoms(path)
+    chains: dict = {}
+    for atom in atoms:
+        entry = chains.setdefault(atom["chain"], {"residues": {}, "hetero": {}, "insertions": set(),
+                                                  "atoms": 0})
+        entry["atoms"] += 1
+        if atom["record"] == "ATOM" and atom["residue"] in STANDARD_RESIDUES:
+            entry["residues"].setdefault(atom["number"], atom["residue"])
+            if atom["insertion"]:
+                entry["insertions"].add(f"{atom['number']}{atom['insertion']}")
+        else:
+            entry["hetero"][atom["residue"]] = entry["hetero"].get(atom["residue"], 0) + 1
+
+    inventory = []
+    for chain, entry in sorted(chains.items()):
+        numbers = sorted(entry["residues"])
+        if not numbers:
+            inventory.append({"chain": chain, "residue_count": 0, "first": None, "last": None,
+                              "segments": [], "gaps": [], "sequence": "",
+                              "hetero": entry["hetero"], "insertion_codes": [],
+                              "atoms": entry["atoms"], "polymer": False})
+            continue
+        segments = residue_spans(numbers)
+        present = set(numbers)
+        gaps = residue_spans([number for number in range(numbers[0], numbers[-1] + 1)
+                              if number not in present])
+        inventory.append({"chain": chain, "residue_count": len(numbers),
+                          "first": numbers[0], "last": numbers[-1], "segments": segments,
+                          "gaps": gaps,
+                          "sequence": "".join(STANDARD_RESIDUES.get(entry["residues"][number], "X")
+                                              for number in numbers),
+                          "hetero": entry["hetero"],
+                          "insertion_codes": sorted(entry["insertions"]),
+                          "atoms": entry["atoms"], "polymer": True})
+    return inventory
+
+
+def polymer_chains(path) -> list:
+    """The chain letters of a file that hold a real polymer, longest first."""
+    return [entry["chain"] for entry in
+            sorted((entry for entry in chain_inventory(path) if entry["residue_count"] >= 2),
+                   key=lambda entry: -entry["residue_count"])]
+
+
+def resolve_chain(path, chain: str = "") -> tuple:
+    """(chain, note) - the chain to use, or a refusal to choose one.
+
+    A file with exactly one polymer chain needs no choice. A file with several
+    does, and this returns ("", reason) rather than taking the longest, because
+    the longest chain of an antibody complex is usually the antibody.
+    """
+    chain = (chain or "").strip()
+    inventory = {entry["chain"]: entry for entry in chain_inventory(path)}
+    candidates = polymer_chains(path)
+    if chain:
+        if chain not in inventory:
+            return "", (f"chain {chain!r} is not in this file; it holds "
+                        f"{', '.join(candidates) or 'no polymer chain'}")
+        if not inventory[chain]["polymer"]:
+            return "", f"chain {chain!r} holds no polymer residues"
+        return chain, (f"chain {chain} as requested, of "
+                       f"{', '.join(sorted(candidates)) or 'no polymer chain'}")
+    if not candidates:
+        return "", "this file holds no polymer chain"
+    if len(candidates) == 1:
+        return candidates[0], f"chain {candidates[0]} is the only polymer chain in the file"
+    described = "; ".join(f"{name} ({inventory[name]['residue_count']} residues)"
+                          for name in sorted(candidates))
+    return "", ("this file holds several polymer chains, so the antigen chain has to be named: "
+                f"{described}. The longest chain is not assumed to be the target - in an "
+                "antibody complex it usually is not.")
+
+
+def geometry_notes(path, chain: str, residues) -> list:
+    """What the coordinates do and do not say about a set of residues.
+
+    Returns readable lines: the span of the selection, its distance from each
+    end of the modelled chain, and the nearest N-glycosylation sequon present in
+    the chain. Every line is a measurement on this file. None of them is an
+    accessibility claim: a soluble fragment's coordinates cannot establish that a
+    site is reachable on a cell, and the last line says so explicitly.
+    """
+    wanted = sorted({int(number) for number in residues})
+    alpha = {}
+    for atom in structure_atoms(path):
+        if atom["chain"] == chain and atom["name"] == "CA" and atom["record"] == "ATOM":
+            alpha.setdefault(atom["number"], (atom["x"], atom["y"], atom["z"]))
+    placed = [number for number in wanted if number in alpha]
+    notes: list[str] = []
+    if not placed:
+        return ["none of the named residues has a modelled CA atom in this chain, so no "
+                "geometry can be reported for them"]
+    absent = [number for number in wanted if number not in alpha]
+    if absent:
+        notes.append(f"not modelled, so excluded from these measurements: {span_text(residue_spans(absent))}")
+
+    def distance(first, second):
+        return sum((first[axis] - second[axis]) ** 2 for axis in range(3)) ** 0.5
+
+    widest = max((distance(alpha[one], alpha[two]) for one in placed for two in placed),
+                 default=0.0)
+    notes.append(f"the {len(placed)} named residues span {widest:.0f} A at their widest "
+                 f"CA-to-CA separation"
+                 + ("" if widest <= 25 else ", which is wide for one contiguous site"))
+    ordered = sorted(alpha)
+    for label, end in (("first", ordered[0]), ("last", ordered[-1])):
+        reach = [distance(alpha[number], alpha[end]) for number in placed]
+        notes.append(f"CA distance to the {label} modelled residue of chain {chain} "
+                     f"({end}): {min(reach):.0f}-{max(reach):.0f} A")
+    inventory = {entry["chain"]: entry for entry in chain_inventory(path)}
+    entry = inventory.get(chain, {})
+    sequence, numbers = entry.get("sequence", ""), None
+    if sequence:
+        numbers = [number for number, _ in sorted(alpha.items())]
+    sequons = []
+    if sequence and numbers and len(sequence) == len(numbers):
+        for index in range(len(sequence) - 2):
+            if sequence[index] == "N" and sequence[index + 1] != "P" \
+                    and sequence[index + 2] in "ST":
+                sequons.append(numbers[index])
+    if sequons:
+        nearest = min(((min(distance(alpha[site], alpha[number]) for number in placed), site)
+                       for site in sequons if site in alpha), default=None)
+        if nearest:
+            notes.append(f"nearest N-glycosylation sequon present in the modelled chain: "
+                         f"N{nearest[1]}, {nearest[0]:.0f} A from the nearest named residue "
+                         f"({len(sequons)} sequons in the chain)")
+    else:
+        notes.append("no N-X-S/T sequon in the modelled part of this chain")
+    notes.append("NOT ESTABLISHED by these coordinates: whether this site is reachable on a "
+                 "cell. Membrane proximity, partner-protein occlusion, glycan shielding and "
+                 "expression context are not properties of a soluble fragment's coordinates. "
+                 "Decide that from the biology and from structures of the full assembly.")
+    return notes
+
+
+def describe_structure(path, chain: str = "") -> dict:
+    """Everything this code can say about a structure file, as data.
+
+    {"path", "format", "chains": [...], "chain": resolved or "",
+     "chain_note", "differences": [...], "declared_unobserved": {...},
+     "problems": [...]}. Nothing here writes a file or chooses for the user.
+    """
+    path = Path(path)
+    report = {"path": str(path), "format": structure_format(path), "chains": [],
+              "chain": "", "chain_note": "", "differences": [], "declared_unobserved": {},
+              "problems": []}
+    if not path.is_file():
+        report["problems"].append(f"not a file: {path}")
+        return report
+    if report["format"] == "fasta":
+        records = read_fasta(path)
+        report["chains"] = [{"chain": name, "residue_count": len(sequence),
+                             "sequence": sequence, "first": 1, "last": len(sequence),
+                             "segments": [(1, len(sequence))], "gaps": [], "hetero": {},
+                             "insertion_codes": [], "polymer": True}
+                            for name, sequence in records]
+        report["chain_note"] = ("a FASTA target carries no coordinates, so there is no chain, "
+                                "no numbering and no coverage to report: the campaign predicts "
+                                "the target's own structure as part of the run")
+        if not records:
+            report["problems"].append("no FASTA record read from this file")
+        return report
+    if report["format"] not in ("pdb", "cif"):
+        report["problems"].append(f"unrecognised structure format for {path.name}; this reads "
+                                  ".pdb, .cif and .fasta")
+        return report
+    report["chains"] = chain_inventory(path)
+    if not report["chains"]:
+        report["problems"].append("no atoms read from this file")
+        return report
+    report["chain"], report["chain_note"] = resolve_chain(path, chain)
+    report["differences"] = sequence_differences(path)
+    report["declared_unobserved"] = declared_unobserved(path)
+    return report
+
+
+def read_fasta(path_or_text) -> list:
+    """[(name, sequence)] from a FASTA file or a pasted FASTA/bare sequence."""
+    text = path_or_text
+    try:
+        candidate = Path(str(path_or_text))
+        if candidate.is_file():
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        pass
+    text = str(text or "")
+    if not text.strip():
+        return []
+    if ">" not in text:
+        sequence = re.sub(r"[^A-Za-z]", "", text).upper()
+        return [("sequence", sequence)] if sequence else []
+    records, name, parts = [], "", []
+    for line in text.splitlines():
+        if line.startswith(">"):
+            if name or parts:
+                records.append((name, re.sub(r"[^A-Za-z]", "", "".join(parts)).upper()))
+            name, parts = line[1:].strip().split()[0] if line[1:].strip() else "sequence", []
+        else:
+            parts.append(line)
+    if name or parts:
+        records.append((name, re.sub(r"[^A-Za-z]", "", "".join(parts)).upper()))
+    return [(name or "sequence", sequence) for name, sequence in records if sequence]
+
+
+def _pdb_line(serial: int, atom: dict) -> str:
+    name = atom["name"]
+    formatted = f" {name:<3}" if len(name) < 4 else name[:4]
+    element = atom.get("element") or (name[0] if name else "")
+    try:
+        occupancy = f"{float(atom.get('occupancy') or 1.0):6.2f}"
+    except (TypeError, ValueError):
+        occupancy = "  1.00"
+    try:
+        bfactor = f"{float(atom.get('bfactor') or 0.0):6.2f}"
+    except (TypeError, ValueError):
+        bfactor = "  0.00"
+    return (f"ATOM  {serial:>5} {formatted}{' '}{atom['residue']:>3} {atom['chain']:>1}"
+            f"{atom['number']:>4}{(atom['insertion'] or ' '):>1}   "
+            f"{atom['x']:>8.3f}{atom['y']:>8.3f}{atom['z']:>8.3f}"
+            f"{occupancy}{bfactor}          {element:>2}")
+
+
+def prepare_target(source, chain: str = "", output=None, name: str = "",
+                   first: int | None = None, last: int | None = None,
+                   provenance: list | None = None) -> dict:
+    """Write one chain of a structure file out as a clean PDB target.
+
+    Keeps that chain's standard polymer residues over the requested residue range
+    and nothing else: no other chain, no ligand, no glycan, no water, no
+    expression tag beyond `last`. The deposited author numbering is preserved,
+    residues the depositors did not place stay absent, and a provenance header
+    records all of it inside the file.
+
+    Returns a report dict with "output", "chain", "residue_count", "segments",
+    "absent", "removed", "sequence", "differences", "problems". A refusal - an
+    ambiguous chain, an unreadable file, data that does not fit PDB columns -
+    comes back in "problems" with nothing written.
+    """
+    source = Path(source)
+    report: dict = {"source": str(source), "output": "", "chain": "", "name": name,
+                    "residue_count": 0, "segments": [], "absent": [], "removed": {},
+                    "sequence": "", "differences": [], "problems": []}
+    described = describe_structure(source, chain)
+    report["problems"] += described["problems"]
+    report["format"] = described["format"]
+    if described["format"] == "fasta":
+        report["problems"].append("this is a FASTA file: use write_fasta_target instead, which "
+                                  "copies the sequence without pretending it has coordinates")
+        return report
+    if report["problems"]:
+        return report
+    if not described["chain"]:
+        report["problems"].append(described["chain_note"])
+        return report
+
+    chain = described["chain"]
+    report["chain"] = chain
+    report["chain_note"] = described["chain_note"]
+    report["differences"] = [difference for difference in described["differences"]
+                            if not difference["chain"] or difference["chain"] == chain]
+
+    atoms = structure_atoms(source)
+    selected, removed = [], {}
+    for atom in atoms:
+        if atom["chain"] != chain:
+            removed[f"chain {atom['chain']}"] = removed.get(f"chain {atom['chain']}", 0) + 1
+            continue
+        if atom["record"] != "ATOM" or atom["residue"] not in STANDARD_RESIDUES:
+            label = f"heteroatom {atom['residue']}"
+            removed[label] = removed.get(label, 0) + 1
+            continue
+        if atom["altloc"] not in ("", " ", ".", "A"):
+            removed["alternate location"] = removed.get("alternate location", 0) + 1
+            continue
+        if first is not None and atom["number"] < int(first):
+            label = f"chain {chain} residue < {first}"
+            removed[label] = removed.get(label, 0) + 1
+            continue
+        if last is not None and atom["number"] > int(last):
+            label = f"chain {chain} residue > {last}"
+            removed[label] = removed.get(label, 0) + 1
+            continue
+        selected.append(atom)
+
+    if not selected:
+        report["problems"].append(f"no standard polymer atoms left in chain {chain} over the "
+                                  f"requested range; nothing was written")
+        report["removed"] = removed
+        return report
+
+    unfit = [atom for atom in selected
+             if len(atom["chain"]) != 1 or not -999 <= atom["number"] <= 9999]
+    if unfit:
+        report["problems"].append(
+            f"{len(unfit)} atom(s) of chain {chain!r} do not fit the fixed PDB columns "
+            "(a chain id longer than one character, or a residue number outside -999..9999). "
+            "Nothing was written: use the original mmCIF as the target_path instead of a "
+            "converted copy.")
+        return report
+    if len(selected) > 99999:
+        report["problems"].append(f"{len(selected)} atoms exceed the PDB serial-number column; "
+                                  "use the original mmCIF as the target_path instead")
+        return report
+
+    numbers = sorted({atom["number"] for atom in selected})
+    present = set(numbers)
+    report["residue_count"] = len(numbers)
+    report["segments"] = residue_spans(numbers)
+    report["absent"] = residue_spans([number for number in range(numbers[0], numbers[-1] + 1)
+                                      if number not in present])
+    residues = {}
+    for atom in selected:
+        residues.setdefault(atom["number"], atom["residue"])
+    report["sequence"] = "".join(STANDARD_RESIDUES.get(residues[number], "X")
+                                 for number in numbers)
+    report["removed"] = removed
+
+    label = name.strip() or f"{source.stem}_{chain}"
+    destination = Path(output) if output else TARGETS_ROOT / f"{label}.pdb"
+    header = [f"REMARK 999 Target prepared by xulab_hpc.prepare_target from {source.name}.",
+              f"REMARK 999 Selection: chain {chain}, residues "
+              f"{first if first is not None else numbers[0]}-"
+              f"{last if last is not None else numbers[-1]} of the source model.",
+              "REMARK 999 The source file's author numbering is preserved unchanged. No",
+              "REMARK 999 coordinate was modelled, mutated, renumbered, minimised or added.",
+              f"REMARK 999 Residues present : {len(numbers)}",
+              f"REMARK 999 Ordered segments : {span_text(report['segments'])}",
+              f"REMARK 999 Absent in source : {span_text(report['absent'])}"]
+    for item, count in sorted(removed.items()):
+        header.append(f"REMARK 999 Removed          : {item} ({count} atoms)")
+    for difference in report["differences"][:20]:
+        header.append(f"REMARK 999 Source SEQADV    : {difference['residue']}"
+                      f"{difference['number']} vs {difference['reference_residue']}"
+                      f"{difference['reference_number']} "
+                      f"{difference['database']} {difference['accession']} "
+                      f"{difference['note']}".rstrip())
+    header += [f"REMARK 999 {line}" for line in (provenance or [])]
+
+    body = list(header)
+    for serial, atom in enumerate(selected, start=1):
+        body.append(_pdb_line(serial, atom))
+    final = selected[-1]
+    body.append(f"TER   {len(selected) + 1:>5}      {final['residue']:>3} {final['chain']:>1}"
+                f"{final['number']:>4}")
+    body.append("END")
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        # The target is read on Linux: LF regardless of the host platform.
+        destination.write_text("\n".join(body) + "\n", encoding="utf-8", newline="\n")
+    except OSError as failure:
+        report["problems"].append(f"could not write {destination}: {failure}")
+        return report
+    report["output"] = str(destination)
+    report["name"] = label
+    return report
+
+
+def write_fasta_target(name: str, sequence_or_fasta: str, directory=None) -> dict:
+    """Write a pasted or uploaded sequence out as a FASTA target.
+
+    BindCraft2 accepts a FASTA target and predicts the target's own structure as
+    part of the campaign. Nothing is validated beyond the alphabet: a sequence
+    that is not protein is reported, not silently accepted.
+    """
+    records = read_fasta(sequence_or_fasta)
+    report = {"output": "", "name": name.strip(), "records": records, "problems": []}
+    if not records:
+        report["problems"].append("no sequence found in that text")
+        return report
+    unknown = sorted({letter for _, sequence in records for letter in sequence
+                      if letter not in ONE_TO_THREE})
+    if unknown:
+        report["problems"].append("not a protein sequence: it carries the non-amino-acid "
+                                  f"letter(s) {', '.join(unknown)}")
+        return report
+    label = name.strip() or records[0][0] or "target"
+    label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label)
+    destination = Path(directory or TARGETS_ROOT) / f"{label}.fasta"
+    text = "\n".join(f">{record_name}\n{sequence}" for record_name, sequence in records) + "\n"
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(text, encoding="utf-8", newline="\n")
+    except OSError as failure:
+        report["problems"].append(f"could not write {destination}: {failure}")
+        return report
+    report["output"] = str(destination)
+    report["name"] = label
+    report["residue_count"] = sum(len(sequence) for _, sequence in records)
+    return report
+
+
+def save_upload(filename: str, content: bytes, directory=None) -> dict:
+    """Store an uploaded structure or FASTA under the targets root.
+
+    The uploaded bytes are written unchanged into `targets/uploads/`, so the
+    original is always still there to re-derive a target from. Nothing is
+    executed and nothing is unpacked: only these extensions are accepted.
+    """
+    allowed = {".pdb", ".ent", ".cif", ".mmcif", ".fasta", ".fa", ".faa", ".seq", ".txt"}
+    report = {"output": "", "problems": []}
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(str(filename)).name) or "upload"
+    if Path(safe).suffix.lower() not in allowed:
+        report["problems"].append(f"{safe}: this step accepts {', '.join(sorted(allowed))}")
+        return report
+    destination = Path(directory or (TARGETS_ROOT / "uploads")) / safe
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(content)
+    except OSError as failure:
+        report["problems"].append(f"could not write {destination}: {failure}")
+        return report
+    report["output"] = str(destination)
+    return report
+
+
+# --------------------------------------------------------------------------- #
+# 1c. RCSB PDB lookup
+#
+# Every function here returns (data, error) and never raises: the HPC compute
+# nodes have no internet access and institutional networks block outbound HTTP
+# often enough that "no network" has to be an ordinary, readable outcome rather
+# than a traceback. `opener` exists so the tests can run without a network.
+# --------------------------------------------------------------------------- #
+
+def _fetch(url: str, payload: dict | None = None, opener=None) -> tuple:
+    """(text, error). A POST when `payload` is given, otherwise a GET."""
+    import urllib.error
+    import urllib.request
+
+    opener = opener or urllib.request.urlopen
+    try:
+        if payload is None:
+            request = urllib.request.Request(url, headers={"Accept": "application/json"})
+        else:
+            request = urllib.request.Request(
+                url, data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json", "Accept": "application/json"})
+        with opener(request, timeout=NETWORK_TIMEOUT) as response:
+            return response.read().decode("utf-8", errors="replace"), ""
+    except urllib.error.HTTPError as failure:
+        return "", f"{url}: HTTP {failure.code} {failure.reason}"
+    except urllib.error.URLError as failure:
+        return "", (f"no network access to {url.split('/')[2]}: {failure.reason}. "
+                    "Prepare the target on a machine with internet access and copy the file "
+                    "across, or point this step at a file already on the cluster.")
+    except (OSError, ValueError) as failure:                         # noqa: BLE001
+        return "", f"{url}: {failure}"
+
+
+def _fetch_json(url: str, payload: dict | None = None, opener=None) -> tuple:
+    text, error = _fetch(url, payload, opener)
+    if error:
+        return {}, error
+    try:
+        return json.loads(text), ""
+    except ValueError as failure:
+        return {}, f"{url}: response was not JSON ({failure})"
+
+
+def looks_like_pdb_id(text: str) -> bool:
+    return bool(re.fullmatch(r"[0-9][A-Za-z0-9]{3}", (text or "").strip()))
+
+
+def looks_like_uniprot(text: str) -> bool:
+    text = (text or "").strip().upper()
+    return bool(re.fullmatch(r"[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}",
+                             text))
+
+
+def rcsb_search(text: str, limit: int = 10, opener=None) -> tuple:
+    """([pdb id, ...], error) for a protein name, a UniProt accession or a PDB ID.
+
+    A UniProt accession is searched as an accession, so it returns the entries
+    that actually reference that protein rather than entries whose text happens
+    to contain the string. Anything else is a full-text search.
+    """
+    text = (text or "").strip()
+    if not text:
+        return [], "type a protein name, a UniProt accession or a PDB ID"
+    if looks_like_pdb_id(text):
+        return [text.upper()], ""
+    if looks_like_uniprot(text):
+        query = {"type": "terminal", "service": "text", "parameters": {
+            "attribute": "rcsb_polymer_entity_container_identifiers."
+                         "reference_sequence_identifiers.database_accession",
+            "operator": "exact_match", "value": text.upper()}}
+    else:
+        query = {"type": "terminal", "service": "full_text", "parameters": {"value": text}}
+    payload = {"query": query, "return_type": "entry",
+               "request_options": {"paginate": {"start": 0, "rows": max(1, int(limit))},
+                                   "results_content_type": ["experimental"],
+                                   "sort": [{"sort_by": "score", "direction": "desc"}]}}
+    data, error = _fetch_json(RCSB_SEARCH, payload, opener)
+    if error:
+        return [], error
+    found = [str(item.get("identifier", "")).upper()
+             for item in data.get("result_set", []) if item.get("identifier")]
+    if not found:
+        return [], f"RCSB found no experimental structure for {text!r}"
+    return found, ""
+
+
+def rcsb_entry_report(pdb_id: str, opener=None) -> tuple:
+    """(report, error) describing one entry and each of its polymer entities.
+
+    The report carries, per entity: description, author chain ids, length,
+    source organism, the UniProt accession SIFTS maps it to, and the alignment
+    offset between the entity's own numbering and that reference sequence. That
+    offset is the residue-number mapping the campaign has to be read with.
+    """
+    pdb_id = (pdb_id or "").strip().upper()
+    if not looks_like_pdb_id(pdb_id):
+        return {}, f"{pdb_id!r} is not a 4-character PDB ID"
+    entry, error = _fetch_json(f"{RCSB_DATA}/entry/{pdb_id}", opener=opener)
+    if error:
+        return {}, error
+    info = entry.get("rcsb_entry_info", {})
+    resolution = info.get("resolution_combined") or []
+    report = {"pdb_id": pdb_id,
+              "title": (entry.get("struct") or {}).get("title", ""),
+              "methods": [item.get("method", "") for item in entry.get("exptl", [])],
+              "resolution": resolution[0] if resolution else None,
+              "released": (entry.get("rcsb_accession_info") or {}).get("initial_release_date", ""),
+              "citation": "", "entities": [], "problems": []}
+    citations = entry.get("citation") or []
+    if citations:
+        first = citations[0]
+        report["citation"] = " ".join(str(part) for part in
+                                      (first.get("title"), first.get("journal_abbrev"),
+                                       first.get("year")) if part)
+    for entity_id in (entry.get("rcsb_entry_container_identifiers") or {}).get(
+            "polymer_entity_ids", []):
+        data, entity_error = _fetch_json(f"{RCSB_DATA}/polymer_entity/{pdb_id}/{entity_id}",
+                                         opener=opener)
+        if entity_error:
+            report["problems"].append(f"entity {entity_id}: {entity_error}")
+            continue
+        identifiers = data.get("rcsb_polymer_entity_container_identifiers") or {}
+        polymer = data.get("entity_poly") or {}
+        organisms = [item.get("scientific_name", "") for item
+                     in data.get("rcsb_entity_source_organism") or []]
+        alignment = []
+        for align in data.get("rcsb_polymer_entity_align") or []:
+            for region in align.get("aligned_regions") or []:
+                alignment.append({"database": align.get("reference_database_name", ""),
+                                  "accession": align.get("reference_database_accession", ""),
+                                  "entity_start": region.get("entity_beg_seq_id"),
+                                  "reference_start": region.get("ref_beg_seq_id"),
+                                  "length": region.get("length")})
+        report["entities"].append({
+            "entity_id": str(entity_id),
+            "description": (data.get("rcsb_polymer_entity") or {}).get("pdbx_description", ""),
+            "chains": identifiers.get("auth_asym_ids") or identifiers.get("asym_ids") or [],
+            "length": polymer.get("rcsb_sample_sequence_length"),
+            "sequence": polymer.get("pdbx_seq_one_letter_code_can", ""),
+            "organisms": [name for name in organisms if name],
+            "uniprot": identifiers.get("uniprot_ids") or [],
+            "alignment": alignment})
+    if not report["entities"]:
+        report["problems"].append("the entry reports no polymer entity")
+    return report, ""
+
+
+def rcsb_download(pdb_id: str, directory=None, opener=None) -> tuple:
+    """(path, error). Downloads the PDB file, falling back to mmCIF.
+
+    Large entries have no PDB-format file at all, which is why the fallback
+    exists rather than being treated as a failure.
+    """
+    pdb_id = (pdb_id or "").strip().upper()
+    if not looks_like_pdb_id(pdb_id):
+        return "", f"{pdb_id!r} is not a 4-character PDB ID"
+    folder = Path(directory or (TARGETS_ROOT / "rcsb"))
+    errors = []
+    for suffix in (".pdb", ".cif"):
+        text, error = _fetch(f"{RCSB_FILES}/{pdb_id}{suffix}", opener=opener)
+        if error:
+            errors.append(error)
+            continue
+        destination = folder / f"{pdb_id}{suffix}"
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            destination.write_text(text, encoding="utf-8", newline="\n")
+        except OSError as failure:
+            return "", f"could not write {destination}: {failure}"
+        return str(destination), ""
+    return "", "; ".join(errors)
+
+
+def entity_of_chain(report: dict, chain: str) -> dict:
+    """The entity of an `rcsb_entry_report` that owns a given author chain."""
+    for entity in report.get("entities", []):
+        if chain in (entity.get("chains") or []):
+            return entity
+    return {}
+
+
+def numbering_mapping(entity: dict) -> list:
+    """Readable lines mapping an entity's own numbering to its reference sequence.
+
+    SIFTS gives the alignment as (entity start, reference start, length). The
+    offset between them is what turns a residue number in the coordinate file
+    into a residue number in, say, UniProt - which is the only way a hotspot
+    list can be compared with the literature.
+    """
+    lines = []
+    for align in entity.get("alignment", []):
+        entity_start = align.get("entity_start")
+        reference_start = align.get("reference_start")
+        length = align.get("length")
+        if not all(isinstance(value, int) for value in (entity_start, reference_start, length)):
+            continue
+        offset = reference_start - entity_start
+        lines.append(
+            f"entity residues {entity_start}-{entity_start + length - 1} map to "
+            f"{align.get('database', '?')} {align.get('accession', '?')} "
+            f"{reference_start}-{reference_start + length - 1} "
+            f"(offset {offset:+d}), per SIFTS")
+    if not lines:
+        lines.append("RCSB reports no reference-sequence alignment for this entity, so no "
+                     "mapping to a database numbering can be stated")
+    lines.append("The coordinate file's own author numbering is what this platform writes and "
+                 "what hotspots must be given in; it is not always the same as the entity "
+                 "numbering above. chain_inventory() prints the author numbering actually "
+                 "present in the file.")
+    return lines
 
 
 # --------------------------------------------------------------------------- #
@@ -351,12 +1294,17 @@ class Submission:
     log_out: str = ""
     log_err: str = ""
     message: str = ""
+    # Which deployment submitted this, so a registry entry can never be mistaken
+    # for one belonging to the other tree.
+    deployment: str = ""
+    source_tree: str = ""
 
     def as_dict(self) -> dict:
         return dict(job_id=self.job_id, campaign=self.campaign, config=self.config,
                     project_folder=self.project_folder, submitted_at=self.submitted_at,
                     command=self.command, log_out=self.log_out, log_err=self.log_err,
-                    message=self.message)
+                    message=self.message, deployment=self.deployment,
+                    source_tree=self.source_tree)
 
 
 def read_registry() -> list[dict]:
@@ -391,6 +1339,16 @@ def submit_campaign(config_path: Path, account: str = "", af2_parameters: str = 
     `nodelist` overrides the node the launcher pins by default (cmri-gpu05, the
     node job 1015050 completed on); a command-line flag beats the directive in
     the script. Leave it empty to use that default.
+
+    The launcher is never edited, including for an isolated deployment. It reads
+    `XULAB_BC2_HOME` and `XULAB_PROJECT_ROOT` from the environment and falls back
+    to the production paths, and its `--output`/`--error` directives name the
+    production log directory. So this function states all three explicitly on
+    every submission: the source tree and project root as `--export`, and the log
+    paths as `--output`/`--error`, where an sbatch flag beats a directive in the
+    script. For the production deployment the values are identical to the
+    launcher's own, and for a development deployment nothing can leak into the
+    production tree by default.
     """
     config_path = Path(config_path)
     if not config_path.is_file():
@@ -405,14 +1363,23 @@ def submit_campaign(config_path: Path, account: str = "", af2_parameters: str = 
     if not parameters:
         located, _ = alphafold_parameters()
         parameters = str(located) if located else ""
-    exports = ["ALL"]
+    # XULAB_BC2_HOME decides which source tree the job executes; XULAB_PROJECT_ROOT
+    # decides where results, caches and tmp go. Both are stated, never inherited.
+    exports = ["ALL", f"XULAB_BC2_HOME={SOURCE_TREE}", f"XULAB_PROJECT_ROOT={PROJECT_ROOT}"]
     if parameters:
         exports.append(f"BINDCRAFT_AF2_PARAMS={parameters}")
+    # The shared weight cache is reused where one is already set, rather than a
+    # second copy being created under a development project root.
+    weights = os.environ.get("BINDCRAFT_WEIGHTS", "")
+    if weights:
+        exports.append(f"BINDCRAFT_WEIGHTS={weights}")
 
     # SLURM opens --output before the job starts, so the directory must exist now.
     LOGS_ROOT.mkdir(parents=True, exist_ok=True)
 
-    command = ["sbatch", "--parsable", f"--export={','.join(exports)}"]
+    command = ["sbatch", "--parsable", f"--export={','.join(exports)}",
+               f"--output={LOGS_ROOT / 'xulab_bc2_%j.out'}",
+               f"--error={LOGS_ROOT / 'xulab_bc2_%j.err'}"]
     if account.strip():
         command.append(f"--account={account.strip()}")
     if nodelist.strip():
@@ -423,7 +1390,8 @@ def submit_campaign(config_path: Path, account: str = "", af2_parameters: str = 
     submission = Submission(campaign=campaign, config=str(config_path),
                             project_folder=project_folder,
                             submitted_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                            command=command)
+                            command=command, deployment=DEPLOYMENT,
+                            source_tree=str(SOURCE_TREE))
     if dry_run:
         submission.message = "dry run: nothing was submitted"
         return submission
@@ -1277,26 +2245,74 @@ def accepted_designs(campaign: Campaign, limit: int = 10) -> list:
     return entries
 
 
-def structure_domains(path, reference: dict | None = None) -> list:
-    """[{chain, length, domain}] for one complex file, naming VH/VL where provable.
+def campaign_target_sequences(campaign: Campaign) -> dict:
+    """{name: sequence} for each target the campaign's metadata names, where readable.
 
-    A chain is called VH or VL only when it carries the scaffold framework
-    anchors for that domain; everything else is reported as "target / other",
-    which is what the PD-L1 complexes get.
+    Read from the target files the recorded settings point at. A target file that
+    has moved or was never on this machine simply does not appear, so the viewer
+    falls back to calling a chain "target" by elimination rather than wrongly.
+    """
+    settings = (campaign.metadata or {}).get("settings")
+    sequences: dict = {}
+    for target in (settings or {}).get("targets", []) if isinstance(settings, dict) else []:
+        located = Path(str(target.get("target_path") or ""))
+        if not located.is_file():
+            continue
+        name = str(target.get("name") or located.stem)
+        wanted = {part.strip() for part in str(target.get("chains") or "").split(",")
+                  if part.strip()}
+        for entry in chain_inventory(located):
+            if entry["sequence"] and (not wanted or entry["chain"] in wanted):
+                sequences[f"{name}:{entry['chain']}"] = entry["sequence"]
+        for record_name, sequence in (read_fasta(located)
+                                      if structure_format(located) == "fasta" else []):
+            sequences[f"{name}:{record_name}"] = sequence
+    return sequences
+
+
+def structure_domains(path, reference: dict | None = None, targets: dict | None = None) -> list:
+    """[{chain, length, domain, evidence}] for one complex file.
+
+    A chain is labelled on evidence, in this order: it matches a chain of the
+    campaign's own target file ("target (<name>)"); it carries the scaffold
+    framework anchors of a variable domain ("VH"/"VL"); or it is a binder chain
+    that this code cannot name more precisely ("binder chain"). Nothing is
+    labelled by position in the file.
     """
     labelled = []
     for chain, numbered in cif_chain_residues(path).items():
         sequence = "".join(code for _, code in numbered)
-        domain = "target / other"
-        if reference:
+        domain, evidence = "unidentified chain", "no sequence evidence for this chain"
+        for name, target_sequence in (targets or {}).items():
+            if sequence and (sequence == target_sequence
+                             or sequence in target_sequence or target_sequence in sequence):
+                domain = f"target ({name.split(':')[0]})"
+                evidence = f"sequence matches the campaign's target file, chain {name.split(':')[-1]}"
+                break
+        else:
             best, score = "", 0
-            for letter, entry in reference.items():
+            for entry in (reference or {}).values():
                 matched = _similarity(sequence, entry)
                 if matched > score:
                     best, score = entry["domain"], matched
             if best:
                 domain = best
-        labelled.append({"chain": chain, "length": len(numbered), "domain": domain})
+                evidence = f"{score} scaffold framework anchors matched"
+            elif targets:
+                domain = "binder chain"
+                evidence = ("no target match and no scaffold framework match, so it is "
+                            "reported as a binder chain without a domain name")
+        labelled.append({"chain": chain, "length": len(numbered), "domain": domain,
+                         "evidence": evidence})
+    # With no target sequences to compare against, a chain that is not a variable
+    # domain cannot be told apart from the target, and is named as the open
+    # question it is rather than asserted to be either.
+    if not targets:
+        for entry in labelled:
+            if entry["domain"] == "unidentified chain":
+                entry["domain"] = "target or binder (not determined)"
+                entry["evidence"] = ("the campaign's target file was not readable from here, so "
+                                     "this chain is not claimed to be either")
     return labelled
 
 
@@ -1332,7 +2348,8 @@ def show_structure(campaign: Campaign, index: int = 0, colour_by: str = "chain",
             reference = scaffold_reference(modality)
         except RuntimeError:
             reference = {}
-    chains = structure_domains(entry["path"], reference or None)
+    chains = structure_domains(entry["path"], reference or None,
+                               campaign_target_sequences(campaign) or None)
 
     view = py3Dmol.view(width=720, height=520)
     view.addModel(entry["path"].read_text(encoding="utf-8", errors="replace"), "cif")
@@ -1362,9 +2379,15 @@ def _highlight_residues(view, campaign: Campaign, entry: dict, chains: list,
     if highlight == "epitope":
         labels = [(match.group(1), int(match.group(2))) for match in
                   re.finditer(r"([A-Z])(\d+)", row.get("Interface_Target_Residues") or "")]
-        targets = [chain["chain"] for chain in chains if chain["domain"] == "target / other"]
-        if not labels or not targets:
-            return "epitope highlight skipped: no recorded contacted target residues"
+        # Any chain this code has not positively called a variable domain is a
+        # candidate target chain; the residue-letter check below decides which
+        # one actually carries the recorded epitope.
+        targets = [chain["chain"] for chain in chains
+                   if chain["domain"] not in ("VH", "VL", "binder chain")]
+        if not labels:
+            return "epitope highlight skipped: no contacted target residues recorded for this design"
+        if not targets:
+            return "epitope highlight skipped: no target chain identified in this structure"
         # Each recorded label carries its residue letter. Only labels that match the
         # structure at that number are drawn, so a numbering difference between the
         # table and the file shows up as a count rather than as sticks in the wrong place.

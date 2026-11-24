@@ -545,13 +545,16 @@ drops its row when the campaign closes - do it deliberately, never as cleanup.
 | Python imports the new source copy | **MECHANISMS PREPARED + CHECKS WRITTEN**; not yet demonstrated on the HPC |
 | Level A - compute smoke | **PASS** - job 1015050, COMPLETED exit `0:0`, JAX 0.11.2 `backend=gpu`, H200 NVL detected, GPU matrix computation PASS |
 | Level B - end-to-end binder output | **NOT ACHIEVED** |
-| Phase 2 Jupyter notebook (`lab/notebooks/xulab_bindcraft_h200.ipynb`) | **IMPLEMENTED**; `nbformat`-valid, all 10 code cells and every widget callback exercised locally against synthetic fixtures; **never run on the HPC** |
+| Jupyter notebook (`lab/notebooks/xulab_bindcraft_h200.ipynb`) | **IMPLEMENTED**; `nbformat`-valid, every code cell parses, and all of cells 2, 3, 7, 8 and 9's widget callbacks exercised locally against fixtures and a stubbed RCSB; **never run on the HPC** |
 | Phase 2 helper module (`lab/notebooks/xulab_hpc.py`) | **IMPLEMENTED**; 90 local assertions pass on both the pandas and no-pandas paths |
-| Phase 4 CD19 target (`lab/targets/CD19_ECD.pdb`, `lab/targets/CD19_ECD.md`) | **BUILT and CHECKED locally** from RCSB 6AL5: chain A, residues 21-277, 227 residues, 1656 atoms; epitope and accessibility numbers computed from 6AL5 and 7JIC coordinates. **Not yet copied to the HPC** |
-| Phase 4 target builder (`lab/scripts/prepare_cd19_target.py`) | **IMPLEMENTED**; run locally against the downloaded 6AL5 entry to produce the committed target file |
-| Phase 4 settings (`lab/configs/cd19_scfv_discovery.json`) | **PREPARED**, NOT RUN - keys and target-path resolution checked against `bindcraft/settings.py` (`read_settings` resolves `targets[].target_path`; the scFv `binder_scaffold` resolves from the preset against the repository root), not executed |
-| Phase 4 scFv annotation, Top 10 report and individual 3D viewer | **IMPLEMENTED**; 127 local assertions in `lab/scripts/test_scfv_annotation.py` and every cell-7/8/9 widget callback exercised by `lab/scripts/test_notebook_cells.py` against four fixture campaigns (scFv, de novo binder, nothing accepted, no campaign loaded). **Never run on real campaign output** |
-| CD19 scFv campaign on the H200 | **NOT SUBMITTED** - no HPC access from the development machine. The exact deployment and submission commands are §8.3; no job ID exists |
+| Phase 5 example target (`lab/targets/CD19_ECD.pdb`, `lab/targets/CD19_ECD.md`) | **BUILT and CHECKED locally** from RCSB 6AL5: chain A, residues 21-277, 227 residues, 1656 atoms, provenance in its own `REMARK 999` header; epitope numbers computed from 6AL5 and 7JIC coordinates. **Not yet copied to the HPC** |
+| Phase 5 target builder (`lab/scripts/prepare_target.py`) | **IMPLEMENTED**; general purpose, run locally against RCSB 6AL5 (PDB) and 7JIC (mmCIF). Replaces the earlier CD19-specific script and reproduces its output |
+| Phase 5 RCSB search / entry lookup / download | **VERIFIED against the live API** on 2026-11-24: `CD19` returned `7URV, 7URX, 6AL5, 7JIC, 6AL4`; `P15391` returned `6AL5, 7JIC, 7URV, 7URX`; the 6AL5 entry report returned the title, X-RAY 3.0 A, three entities with chains and the SIFTS mapping `entity 1-257 -> UniProt P15391 21-277`. Offline behaviour tested with a stub, not against a real outage |
+| Phase 5 example settings (`lab/configs/cd19_scfv_discovery.json`) | **PREPARED**, NOT RUN - keys and target-path resolution checked against `bindcraft/settings.py` (`read_settings` resolves `targets[].target_path`; the scFv `binder_scaffold` resolves from the preset against the repository root), not executed |
+| Phase 5 scFv annotation, Top 10 report and individual 3D viewer | **IMPLEMENTED**; 128 local assertions in `lab/scripts/test_scfv_annotation.py` and every cell-2/3/7/8/9 widget callback exercised by `lab/scripts/test_notebook_cells.py`. **Never run on real campaign output** |
+| Phase 5 target step, generic reporting and chain labelling | **IMPLEMENTED**; 155 local assertions in `lab/scripts/test_target_tools.py` (PDB and mmCIF parsing, declared mutations and unplaced residues, chain-ambiguity refusal, preparation, FASTA and upload handling, RCSB routing and offline behaviour) |
+| Phase 5 isolated development deployment | **IMPLEMENTED and TESTED LOCALLY**; 102 assertions in `lab/scripts/test_deployment_isolation.py` prove all thirteen derived paths and a real `dry_run` `sbatch` command name neither production tree. `lab/scripts/setup_dev_deployment.sh` is `bash -n` clean and was dry-run locally, including its refusal of the production paths. **The HPC directories do not exist yet and nothing has been cloned** |
+| Any campaign on the H200 since the PD-L1 smoke test | **NOT SUBMITTED** - no HPC access from the development machine. The exact commands are §8.1, §9.2 and §9.3; no job ID exists |
 | Real `sbatch` behaviour on the HPC | **VERIFIED**: `sbatch` works on `cmri-gpu05`. `srun` does **not** work in this CMRI setup (SLURM GRES errors), so nothing in the execution path uses it |
 | `squeue` / `sacct` polling from the notebook kernel | **NOT TESTED** (no SLURM on the development machine) |
 | `py3Dmol` rendering inside institutional Jupyter | **NOT TESTED** (needs internet access for 3Dmol.js) |
@@ -596,151 +599,131 @@ If `ipywidgets` or `py3Dmol` is missing from the kernel, the environment cell
 says so and the rest still works: `py3Dmol` only affects step 8, and the CIF
 files can always be downloaded and opened locally.
 
-## 8. The CD19 scFv discovery campaign (Phase 4)
+## 8. The binder discovery platform (Phase 5)
 
-A second, independent campaign: a human CD19 extracellular-domain target and the
-upstream `scFv` modality, aiming for up to ten computationally accepted
-candidates. It shares nothing with the PD-L1 campaign but the launcher and the
-environment - a different target file, a different settings file and a different
-results folder - so the PD-L1 campaign and its backup are untouched by it.
+The deployment is general purpose: any protein target, any binder format
+BindCraft2 supports. Human CD19 and the scFv format are the **default example**
+the platform was first driven with end to end, not a restriction built into it.
 
 Nothing in `lab/slurm/run_bindcraft_h200.slurm`, in the H200 or `sbatch`
 settings, in the environment, in the AlphaFold/ProteinMPNN models or in any
-upstream algorithm was changed for it.
+upstream algorithm was changed for any of this.
 
-### 8.1 Target
+### 8.1 Naming a target
+
+Notebook step 2 takes a target six ways, and whichever is used the result is the
+same: a file under the deployment's **targets root**, plus a settings entry the
+notebook writes into the campaign JSON. No JSON is edited by hand.
+
+| Source | Needs | Notes |
+| --- | --- | --- |
+| search RCSB | a protein name, a UniProt accession or a PDB ID | needs internet from the kernel |
+| a PDB ID | e.g. `6AL5` | downloads the entry, then the chain is chosen |
+| upload a file | `.pdb`, `.cif`, `.fasta` | stored unchanged under `targets/uploads/` |
+| paste a sequence | FASTA or a bare sequence | written as a FASTA target |
+| a file on the cluster | an absolute path | used where it is; nothing is copied |
+| a shipped preset | one of upstream's own targets | unchanged |
+
+A name goes to RCSB's full-text search; a UniProt accession goes to the
+accession attribute, so it returns entries that actually reference that protein
+rather than entries whose text happens to contain the string. Both were verified
+against the live API: `CD19` → `7URV, 7URX, 6AL5, 7JIC, 6AL4`; `P15391` →
+`6AL5, 7JIC, 7URV, 7URX`.
+
+**Chain selection is never done for you.** When an entry holds more than one
+polymer chain the form lists each chain with its size and the entity description
+RCSB gives for it, and waits. Nothing is pre-selected, because the longest chain
+of an antibody complex is usually the antibody. A single-chain file needs no
+choice and is pre-selected.
+
+**Reported before anything is committed:** entry title, method, resolution,
+release date and citation; per entity the description, author chain, length,
+organism and UniProt accession; the residue range present; the ordered segments
+and the gaps; the engineered mutations and expression tags the file itself
+declares (`SEQADV`, or mmCIF `_struct_ref_seq_dif`); the residues the depositors
+declare unplaced (`REMARK 465`, or `_pdbx_unobs_or_zero_occ_residues`); and the
+SIFTS mapping from the entity's numbering to its reference sequence. The target
+is written with the **deposited author numbering unchanged**, which is the
+numbering hotspots have to be given in.
+
+**Hotspots and coldspots are optional.** Left empty, BindCraft2 picks its own
+interface on the target.
+
+**On accessibility.** The geometry report measures the site's widest CA-to-CA
+span, its distance to each end of the modelled chain, and the nearest
+N-glycosylation sequon present. It then states in as many words that whether the
+site is reachable on a cell is **not established** by those coordinates -
+membrane proximity, partner-protein occlusion and glycan shielding are not
+properties of a soluble fragment. No code path in this platform claims
+accessibility from coordinates.
+
+**With no network**, the search and PDB-ID routes say so, name the host and give
+the alternative. Prepare the file where there is internet access and copy it
+across:
+
+```bash
+python lab/scripts/prepare_target.py --search "CD19"
+python lab/scripts/prepare_target.py --entry 6AL5 --describe
+python lab/scripts/prepare_target.py --entry 6AL5 --chain A --first 21 --last 277 \
+    --name hCD19_ECD --contacts
+python lab/scripts/prepare_target.py --source /path/to/already_downloaded.cif --describe
+```
+
+### 8.2 The default example target
 
 | Item | Value |
 | --- | --- |
 | Structure | RCSB **6AL5**, X-ray 3.0 Å, "COMPLEX BETWEEN CD19 (N138Q MUTANT) AND B43 FAB" |
-| CD19 chain | **A**, residues **21-277**, deposited author numbering (= UniProt P15391) kept unchanged |
-| Prepared file | `lab/targets/CD19_ECD.pdb` (227 residues, 1656 atoms; Fab chains, glycans, waters and the C-terminal GSHHHHHH tag removed) |
-| Built by | `lab/scripts/prepare_cd19_target.py` (standard library only) |
-| Hotspots | `A162,A219,A220,A222` - all four contacted by **both** B43 in 6AL5 and coltuximab in 7JIC |
-| Full record | [`lab/targets/CD19_ECD.md`](lab/targets/CD19_ECD.md): construct differences, the three unplaced segments, the two-antibody epitope consensus, and the membrane / CD81 / glycan accessibility checks |
+| CD19 chain | **A**, residues **21-277**, deposited author numbering (= UniProt P15391) unchanged |
+| Prepared file | `lab/targets/CD19_ECD.pdb` (227 residues, 1656 atoms; Fab chains, glycans, waters and the C-terminal `GSHHHHHH` tag removed) |
+| Built by | `lab/scripts/prepare_target.py` (standard library only) |
+| Hotspots | `A162,A219,A220,A222` - each contacted by **both** B43 in 6AL5 and coltuximab in 7JIC |
+| Full record | [`lab/targets/CD19_ECD.md`](lab/targets/CD19_ECD.md) |
 
 The prepared `.pdb` is committed because the compute nodes have no internet
-access; `prepare_cd19_target.py --fetch` regenerates it from RCSB on a machine
-that does.
+access, and its own `REMARK 999` header carries the full provenance including
+the SIFTS mapping.
 
-### 8.2 Settings
+### 8.3 Campaign settings
 
-`lab/configs/cd19_scfv_discovery.json`: `modality: scFv`, the target above,
-`number_of_final_designs: 10`, `max_trajectories: 500`, `workers_per_gpu: 1`,
-`project_folder: /project/yli4/ypan/bindcraft/results/cd19_scfv_discovery`,
-`resume: true`. Nothing else is set, so every loss, filter, CDR span and
-acceptance threshold is what the shipped `settings/core/default.json` and
-`settings/modality/scFv.json` define.
+Notebook step 3 opens on **scFv**, 10 final designs and 500 trajectories, with
+resume on. Every other format is one dropdown away; scaffolded formats (VHH,
+ARP, scFv, Fab) hide the length boxes because the scaffold decides the domain
+lengths. Every acceptance filter, loss and CDR span comes from the shipped
+presets and stays enabled.
 
-Note for comparison: upstream's own `examples/pdl1_scfv.json` relaxes
-`min_iptm_final` from the core default 0.7 to 0.6. This campaign does **not**
-copy that, so its acceptance bar is the stricter core default. If the campaign
-finishes its budget with few or no accepted designs, that single threshold - not
+`lab/configs/cd19_scfv_discovery.json` is the committed example of what step 3
+writes. Note for comparison: upstream's own `examples/pdl1_scfv.json` relaxes
+`min_iptm_final` from the core default 0.7 to 0.6. This example does **not**
+copy that, so its acceptance bar is the stricter core default. If a campaign
+finishes its budget with few or no accepted designs, that one threshold - not
 the CDR spans, and not the filter set - is the first thing to reconsider, and
 changing it is a deliberate, recorded decision.
 
-### 8.3 Deploy and submit (exact commands)
+### 8.4 Reading the results
 
-Step 1, on Windows in Git Bash, push the source change:
+Step 7 reports up to ten **accepted** designs in the pipeline's own `i_pDAE`
+order, with the predicted target-contact residues taken from
+`Interface_Target_Residues` as the pipeline recorded them. For an antibody
+format each design also gets its VH and VL named from the scaffold framework and
+its loops annotated; the quotable HCDR3 length is the Kabat one, measured
+between the conserved Cys stem and the `W-G-x-G` motif located in the design
+itself. Rejected candidates and their `failed_filters` stay available underneath.
 
-```bash
-cd /c/XuLab/BindCraft2
-git push origin xulab-bindcraft2:main
-```
+Step 8 defaults to **Individual View**: one complex at a time from a dropdown of
+the accepted designs that actually have a file, with Previous/Next, colour by
+chain or pLDDT, and an optional HCDR3 or epitope highlight. Chains are labelled
+on evidence, in this order: a chain whose sequence matches the campaign's own
+target file is `target (<name>)`; a chain carrying the scaffold framework
+anchors is `VH` or `VL`; anything else is `binder chain`, or - when the target
+file is not readable from the notebook - `target or binder (not determined)`.
+Each label carries the evidence it was given on. Compare View is retained, up to
+10 complexes.
 
-Step 2, get the four new/changed files onto the HPC. Option C (the HPC copy is a
-Git clone) is one command:
+A highlight that cannot be mapped safely onto the structure's numbering is
+skipped with a reason rather than drawn in the wrong place.
 
-```bash
-cd /home/ypan/BindCraft2/BindCraft2_deploy
-git pull --ff-only origin main
-git rev-parse HEAD                      # record which revision ran
-```
-
-Otherwise rsync the working tree (Option B of §3.2), or scp just these files:
-
-```bash
-# from Windows, Git Bash
-cd /c/XuLab/BindCraft2
-scp lab/targets/CD19_ECD.pdb lab/targets/CD19_ECD.md \
-    <user>@<hpc-host>:/home/ypan/BindCraft2/BindCraft2_deploy/lab/targets/
-scp lab/configs/cd19_scfv_discovery.json \
-    <user>@<hpc-host>:/home/ypan/BindCraft2/BindCraft2_deploy/lab/configs/
-scp lab/notebooks/xulab_hpc.py lab/notebooks/xulab_bindcraft_h200.ipynb \
-    <user>@<hpc-host>:/home/ypan/BindCraft2/BindCraft2_deploy/lab/notebooks/
-scp lab/scripts/prepare_cd19_target.py lab/scripts/test_scfv_annotation.py \
-    lab/scripts/test_notebook_cells.py \
-    <user>@<hpc-host>:/home/ypan/BindCraft2/BindCraft2_deploy/lab/scripts/
-```
-
-`mkdir -p .../lab/targets` first if that directory does not exist yet.
-
-Step 3, on an HPC login node, put the target where the settings file points and
-confirm the existing campaign data is intact:
-
-```bash
-cd /home/ypan/BindCraft2/BindCraft2_deploy
-
-# the PD-L1 campaign and its backup must be untouched; look, do not assume
-ls -ld /project/yli4/ypan/bindcraft/results/pdl1_h200_smoke \
-       /project/yli4/ypan/bindcraft_backups/pdl1_20261123_172646
-
-# the CD19 target, in project storage, beside the results it will be used for
-mkdir -p /project/yli4/ypan/bindcraft/targets
-cp -n lab/targets/CD19_ECD.pdb /project/yli4/ypan/bindcraft/targets/CD19_ECD.pdb
-grep -c '^ATOM' /project/yli4/ypan/bindcraft/targets/CD19_ECD.pdb   # expect 1656
-grep -m1 '^REMARK 999' /project/yli4/ypan/bindcraft/targets/CD19_ECD.pdb
-
-# the settings file must point at that copy, and only at it
-python -c "import json;print(json.load(open('lab/configs/cd19_scfv_discovery.json'))['targets'])"
-
-# the local tests, which need no GPU and no allocation
-/home/ypan/.conda/envs/bindcraft2/bin/python lab/scripts/test_scfv_annotation.py
-/home/ypan/.conda/envs/bindcraft2/bin/python lab/scripts/test_notebook_cells.py
-
-bash lab/scripts/hpc_preflight.sh        # must still print RESULT: READY
-```
-
-Step 4, submit. This is the **same launcher, same path, same flags** as the
-PD-L1 job; only the settings file differs:
-
-```bash
-mkdir -p /project/yli4/ypan/bindcraft/logs
-cd /home/ypan/BindCraft2/BindCraft2_deploy
-sbatch --export=ALL,BINDCRAFT_AF2_PARAMS="$BINDCRAFT_AF2_PARAMS" \
-  lab/slurm/run_bindcraft_h200.slurm lab/configs/cd19_scfv_discovery.json
-# add --account=<account> if this site charges work to one
-# the launcher pins cmri-gpu05; another H200 node needs only --nodelist=<node>
-```
-
-Equivalently from the notebook: cell 1, then cell 2 with *a file on the cluster*
-= `/project/yli4/ypan/bindcraft/targets/CD19_ECD.pdb`, chains `A`, hotspots
-`A162,A219,A220,A222`; cell 3 with binder type **scFv**, campaign name
-`cd19_scfv_discovery`, 10 final designs, 500 max trajectories, 1 worker per GPU;
-then cell 4 to submit. The length boxes disappear for scFv, which is correct -
-the scaffold decides the domain lengths.
-
-Step 5, watch and read it:
-
-```bash
-squeue -u "$USER"
-tail -f /project/yli4/ypan/bindcraft/logs/xulab_bc2_<jobid>.out
-ls /project/yli4/ypan/bindcraft/results/cd19_scfv_discovery/3_Ranked/
-```
-
-`max_trajectories: 500` with `resume: true` means the campaign can be resubmitted
-with the same command and continues in the same folder. 08:00:00 is the wall
-clock the launcher declares; a budget of 500 trajectories may need more than one
-submission, and resuming is the supported way to do that.
-
-Step 6, in the notebook: cell 6 loads
-`/project/yli4/ypan/bindcraft/results/cd19_scfv_discovery`, cell 7 prints up to
-ten accepted candidates with VH/VL sequences, annotated loops and the Kabat
-HCDR3, cell 8 reviews them one at a time in 3D, cell 9 exports the ranked CSV,
-the VH/VL FASTA, the loop table, the numbering record, the `.cif` complexes and
-a zip, and cell 10 audits the campaign folder.
-
-### 8.4 What the output is, and is not
+### 8.5 What the output is, and is not
 
 The upstream `scFv` preset models **VH and VL as two separate chains with no
 designed linker**. An accepted design is therefore not a complete, expressible
@@ -748,13 +731,144 @@ single-chain scFv construct, and this project does not supply a linker for it.
 
 `i_pDAE`, `i_pTM`, `i_pAE`, `pLDDT` and `pTM` are prediction confidence
 readings. They are not affinity, not specificity, not stability, not
-developability and not probabilities of binding. No K_d, no epitope validation
-and no functional claim can be read off them. Acceptance means the configured
-computational filters passed.
+developability and not probabilities of binding. The contacted target residues
+are a property of the complex the pipeline predicted, not a mapped epitope.
+Acceptance means the configured computational filters passed.
 
 ---
 
-## 9. Licensing and safety
+## 9. The isolated development deployment
+
+Development happens in a second deployment that shares the cluster's conda
+environment and model weights and **nothing else** with production.
+
+| | Production | Development |
+| --- | --- | --- |
+| Source tree | `/home/ypan/BindCraft2/BindCraft2_deploy` | `/home/ypan/BindCraft2/BindCraft2_cd19_dev` |
+| Project root | `/project/yli4/ypan/bindcraft` | `/project/yli4/ypan/bindcraft_cd19_dev` |
+| Results | `<project>/results` | `<project>/results` |
+| Logs | `<project>/logs` | `<project>/logs` |
+| Prepared targets | `<project>/targets` | `<project>/targets` |
+| Caches, tmp, JAX cache | `<project>/cache`, `/tmp` | `<project>/cache`, `/tmp` |
+| Generated campaign JSON | `<source>/lab/configs/generated` | `<source>/lab/configs/generated` |
+| Job registry | `<project>/results/.xulab_jobs.json` | `<project>/results/.xulab_jobs.json` |
+| conda environment | `/home/ypan/.conda/envs/bindcraft2` | **the same, shared, read only** |
+| AlphaFold / MPNN weights | `/project/yli4/ypan/bindcraft/cache/bindcraft` | **the same, shared, read only** |
+
+### 9.1 How the separation is enforced
+
+No tracked file names a deployment, and the proven SLURM launcher is not edited.
+Two mechanisms do the work:
+
+1. **`lab/scripts/dev_env.sh`** exports `XULAB_DEPLOYMENT`, `XULAB_BC2_HOME`,
+   `XULAB_PROJECT_ROOT` and every derived root. `xulab_hpc.py` reads them, so
+   results, logs, targets, caches, generated JSON and the job registry all move
+   together. Sourcing nothing leaves a shell on production.
+2. **`submit_campaign` states every path on the `sbatch` command line.** The
+   launcher reads `XULAB_BC2_HOME` and `XULAB_PROJECT_ROOT` from the environment
+   and falls back to the production paths, and its `--output`/`--error`
+   directives name the production log directory. So every submission now passes
+   `--export=ALL,XULAB_BC2_HOME=...,XULAB_PROJECT_ROOT=...` and
+   `--output=/--error=` into its own logs root, where an `sbatch` flag beats a
+   directive in the script. For production the values are identical to the
+   launcher's own; for development nothing can fall back into the production
+   tree. `BINDCRAFT_AF2_PARAMS` and `BINDCRAFT_WEIGHTS` are passed through, so
+   the shared weights are reused and never copied.
+
+`lab/scripts/test_deployment_isolation.py` asserts this: it loads the helper
+under each deployment's variables, checks all thirteen derived paths, builds a
+real `sbatch` command with `dry_run=True`, and fails if the production source
+tree or project tree is named anywhere in it. 102 assertions, passing.
+
+### 9.2 Setting it up (exact commands)
+
+```bash
+# 1. on an HPC login node, inspect what would happen - this creates nothing
+cd /home/ypan/BindCraft2/BindCraft2_deploy      # or any checkout of this repo
+export XULAB_BC2_HOME=/home/ypan/BindCraft2/BindCraft2_cd19_dev
+export XULAB_PROJECT_ROOT=/project/yli4/ypan/bindcraft_cd19_dev
+bash lab/scripts/setup_dev_deployment.sh
+
+# 2. create the project directories and clone the source tree
+bash lab/scripts/setup_dev_deployment.sh --create
+#    equivalently, by hand:
+#      mkdir -p /project/yli4/ypan/bindcraft_cd19_dev/{results,logs,cache/jax,tmp,targets}
+#      git clone --branch main https://github.com/cmri4902/XuLab-BinderDesign.git \
+#          /home/ypan/BindCraft2/BindCraft2_cd19_dev
+
+# 3. from now on, every development shell starts with this one line
+cd /home/ypan/BindCraft2/BindCraft2_cd19_dev
+source lab/scripts/dev_env.sh                   # prints the deployment it selected
+
+# 4. the checks, none of which needs a GPU or an allocation
+bash lab/scripts/hpc_preflight.sh               # must print RESULT: READY
+PY=/home/ypan/.conda/envs/bindcraft2/bin/python
+$PY lab/scripts/test_scfv_annotation.py         # expect 128/128, RESULT: PASS
+$PY lab/scripts/test_target_tools.py            # expect 155/155, RESULT: PASS
+$PY lab/scripts/test_deployment_isolation.py    # expect 103/103, RESULT: PASS
+$PY lab/scripts/test_notebook_cells.py          # expect RESULT: PASS
+
+# 5. confirm production is untouched before and after anything is submitted
+ls -ld /project/yli4/ypan/bindcraft/results/pdl1_h200_smoke \
+       /project/yli4/ypan/bindcraft_backups/pdl1_20261123_172646
+ls /project/yli4/ypan/bindcraft/results
+```
+
+### 9.3 Running a campaign in the development deployment
+
+```bash
+cd /home/ypan/BindCraft2/BindCraft2_cd19_dev
+source lab/scripts/dev_env.sh
+
+# the example target, into the DEV targets root
+cp -n lab/targets/CD19_ECD.pdb "$XULAB_TARGETS/CD19_ECD.pdb"
+grep -c '^ATOM' "$XULAB_TARGETS/CD19_ECD.pdb"          # expect 1656
+
+# a settings file pointing at that copy; the notebook writes this for you, or:
+$PY - <<'JSON'
+import json, os, pathlib
+project = os.environ["XULAB_PROJECT_ROOT"]
+settings = {"modality": "scFv", "campaign_name": "cd19_scfv_dev",
+            "targets": [{"name": "hCD19_ECD",
+                         "target_path": f"{project}/targets/CD19_ECD.pdb",
+                         "chains": "A", "hotspots": "A162,A219,A220,A222"}],
+            "number_of_final_designs": 10, "max_trajectories": 500,
+            "workers_per_gpu": 1, "resume": True,
+            "project_folder": f"{project}/results/cd19_scfv_dev"}
+path = pathlib.Path("lab/configs/generated/cd19_scfv_dev.json")
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(settings, indent=2) + "\n")
+print(path)
+JSON
+
+# submit: the SAME unmodified launcher, with every path stated on the command line
+mkdir -p "$XULAB_LOGS"
+sbatch --parsable \
+  --export=ALL,XULAB_BC2_HOME="$XULAB_BC2_HOME",XULAB_PROJECT_ROOT="$XULAB_PROJECT_ROOT",BINDCRAFT_AF2_PARAMS="$BINDCRAFT_AF2_PARAMS",BINDCRAFT_WEIGHTS="$BINDCRAFT_WEIGHTS" \
+  --output="$XULAB_LOGS/xulab_bc2_%j.out" \
+  --error="$XULAB_LOGS/xulab_bc2_%j.err" \
+  lab/slurm/run_bindcraft_h200.slurm lab/configs/generated/cd19_scfv_dev.json
+# add --account=<account> if this site charges work to one
+# the launcher pins cmri-gpu05; another H200 node needs only --nodelist=<node>
+
+squeue -u "$USER"
+tail -f "$XULAB_LOGS"/xulab_bc2_<jobid>.out
+```
+
+Or from the notebook, which builds exactly that command:
+
+```bash
+cd /home/ypan/BindCraft2/BindCraft2_cd19_dev
+source lab/scripts/dev_env.sh
+jupyter lab      # cell 1 prints "deployment: cd19_dev" and every dev path
+```
+
+`resume: true` means the same command continues the same folder, which is how a
+500-trajectory budget spans more than one 08:00:00 allocation.
+
+---
+
+## 10. Licensing and safety
 
 BindCraft2 is **source-available with hosting restrictions**, not MIT. Internal
 organizational use and source modification are permitted subject to attribution
