@@ -7,6 +7,52 @@ commit `8c1a858fdc1bfc94c60846ff11a0d01c9aa44136` (`v1.0.4-4-g8c1a858`,
 The upstream license requires that modifications be marked. This file is that
 record.
 
+## 2026-11-24 (Phase 4) - CD19 scFv discovery campaign, Top 10 report, individual 3D viewer
+
+A second campaign on the deployment the PD-L1 smoke test proved, plus the two
+PI-facing readouts it needs. Nothing in the execution path changed:
+`lab/slurm/run_bindcraft_h200.slurm` is byte-identical, the H200 and `sbatch`
+settings are untouched, no dependency was added or reinstalled, no AlphaFold or
+ProteinMPNN model or weight was touched, and no upstream file was edited. The
+PD-L1 campaign in `results/pdl1_h200_smoke` and its backup are not read, written
+or referenced by any of this except to be left alone.
+
+The campaign has **not** been submitted: there is no HPC access from the
+development machine, so there is no job ID and no result to report. The exact
+deployment and submission commands are `README_XULAB.md` §8.3.
+
+### Added
+
+| File | What it does |
+| --- | --- |
+| `lab/targets/CD19_ECD.pdb` | The target: human CD19 extracellular domain from RCSB **6AL5** (X-ray, 3.0 Å), chain **A**, residues **21-277**, 227 residues, 1656 atoms. B43 Fab chains, N-glycans, waters and the C-terminal GSHHHHHH expression tag removed; deposited author numbering (= UniProt P15391) kept unchanged; the three segments the depositors could not place (40-47, 138-152, 177-183) left absent rather than modelled. Provenance is written into the file as `REMARK 999` lines. Committed because the compute nodes have no internet access. |
+| `lab/targets/CD19_ECD.md` | The target's record: source entry, construct differences (N138Q lies inside the unplaced 138-152 segment, so no mutated residue is present), the B43 epitope computed from 6AL5, the coltuximab epitope computed from 7JIC, their consensus, the four hotspots chosen from it, and the membrane / CD81 / glycan accessibility checks with the distances they were decided on. |
+| `lab/scripts/prepare_cd19_target.py` | Builds that file from a downloaded RCSB entry: chain and residue-range selection, tag and heteroatom removal, provenance header, and a `--report` mode that prints the antibody epitope contained in the source entry. Standard library only; `--fetch` downloads the entry where there is internet access. |
+| `lab/configs/cd19_scfv_discovery.json` | The campaign: `modality: scFv`, that target with hotspots `A162,A219,A220,A222`, `number_of_final_designs: 10`, `max_trajectories: 500`, `workers_per_gpu: 1`, its own `project_folder`, `resume: true`. Nothing else is set, so every loss, filter, CDR span and acceptance threshold is the shipped default. In particular `min_iptm_final` is left at the core default 0.7 and **not** relaxed to the 0.6 that upstream's own `examples/pdl1_scfv.json` uses. |
+| `lab/scripts/test_scfv_annotation.py` | 127 assertions over the new helper functions: the preset's paratope spans and flag meanings, the scaffold reference, annotation of the scaffold against itself, annotation of a synthetic design with edited loops and a changed HCDR3 length, the refusals (truncated domain, missing W-G-x-G motif, non-antibody sequence, mismatched paratope label), the paratope split, and four fixture campaigns end to end including the export. Standard library plus the helper; no SLURM, GPU, pandas or py3Dmol needed. |
+| `lab/scripts/test_notebook_cells.py` | Executes notebook cells 7, 8 and 9 out of the `.ipynb` in a plain Python process and then invokes every widget callback (show top candidates, refresh, show structure, Next, Previous, export, Compare View) against four fixture campaigns: scFv with a design whose structure file is missing, de novo binder, nothing accepted, and no campaign loaded. |
+
+### Changed
+
+| File | Change |
+| --- | --- |
+| `lab/notebooks/xulab_hpc.py` | One new section added (`4b`), existing functions left alone except `export_campaign`. New: `cif_chain_residues`, `paratope_spans`, `designed_positions`, `merged_loops`, `scaffold_reference`, `domain_anchors`, `annotate_domain`, `kabat_hcdr3`, `assign_domains`, `split_paratope`, `is_antibody_campaign`, `top_designs`, `domain_fasta`, `cdr_table`, `cdr_table_view`, `accepted_designs`, `structure_domains`, `show_structure`. Loop spans are read from the shipped modality preset's `mutate_positions` in the scaffold's own numbering and located in each design by exact framework anchors; a domain is called VH or VL only when its framework matches that scaffold chain; the quotable HCDR3 is the Kabat one, measured between the conserved Cys stem and the W-G-x-G motif found in the design itself. Anything that cannot be established that way is returned as unavailable with a reason, never guessed. `export_campaign` gains a `<campaign>_VH_VL.fasta`, a `<campaign>_CDRs.csv` and a `<campaign>_CDR_numbering.txt` **for antibody-format campaigns only**, so a de novo binder export is unchanged. `show_structures` is untouched. |
+| `lab/notebooks/xulab_bindcraft_h200.ipynb` | Cells 7, 8 and 9 only; cells 1-6 and 10 are unchanged. Cell 7 becomes the Top 10 accepted-candidate report (ranked order straight from `3_Ranked/!_Ranked.csv`, VH/VL sequences, annotated loops with their convention, Kabat HCDR3, confidence and interface readings, contacted target residues, CDR-versus-framework contacts, and the rejected candidates with their `failed_filters` underneath). Cell 8 defaults to **Individual View**: a dropdown built from the accepted designs that actually have a complex file, labelled by rank and ID, one complex at a time, with Previous/Next, `colour by chain` / `colour by pLDDT` kept, an optional HCDR3 or epitope highlight that is skipped with a reason when it cannot be established, and the rank, ID, filename, path and metrics printed beside the viewer; Compare View is retained with its limit raised from 8 to 10. Cell 9's text notes the extra antibody exports. |
+| `README_XULAB.md` | New §8, the CD19 campaign: target, settings, exact deployment and submission commands, what the output is and is not. The old §8 becomes §9. New status rows, all of which say NOT SUBMITTED for the job itself. |
+| `lab/README.md` | Rows for the new files and their status. |
+
+### Deliberately not done
+
+* No linker between VH and VL. The upstream `scFv` preset models them as two
+  chains without one; inventing a linker would be inventing a construct.
+* `min_iptm_final` not relaxed. Ten accepted designs is a goal, not a target to
+  be reached by moving the bar; the report says plainly when fewer passed and
+  never promotes a rejected candidate.
+* No change to the CDR spans, the filter set, the losses, the models, the
+  launcher, the GPU settings or the environment.
+* No overlay in Compare View. The limit was raised to 10, which is what was
+  asked for; a structural overlay would have been a fragile addition.
+
 ## 2026-11-23 (Phase 3b) - the launcher runs on the proven sbatch path, no srun
 
 Job 1015050 settled the open question from Phase 3a. On `cmri-gpu05`, submitted

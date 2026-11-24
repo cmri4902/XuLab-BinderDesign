@@ -1,0 +1,17 @@
+{
+  "modality": "scFv",
+  "campaign_name": "cd19_scfv_discovery",
+  "targets": [
+    {
+      "name": "hCD19_ECD",
+      "target_path": "/project/yli4/ypan/bindcraft/targets/CD19_ECD.pdb",
+      "chains": "A",
+      "hotspots": "A162,A219,A220,A222"
+    }
+  ],
+  "number_of_final_designs": 10,
+  "max_trajectories": 500,
+  "workers_per_gpu": 1,
+  "project_folder": "/project/yli4/ypan/bindcraft/results/cd19_scfv_discovery",
+  "resume": true
+}

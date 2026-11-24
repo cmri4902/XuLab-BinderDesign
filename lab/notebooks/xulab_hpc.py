@@ -51,6 +51,7 @@ SLURM_SCRIPT = SOURCE_TREE / "lab" / "slurm" / "run_bindcraft_h200.slurm"
 VALIDATOR = SOURCE_TREE / "lab" / "scripts" / "validate_outputs.py"
 GENERATED_CONFIGS = SOURCE_TREE / "lab" / "configs" / "generated"
 PRESETS = SOURCE_TREE / "settings"
+SCAFFOLDS = SOURCE_TREE / "scaffolds"
 # Job records live with the results, not with the source, so a source update or a
 # new notebook session cannot lose them.
 JOB_REGISTRY = RESULTS_ROOT / ".xulab_jobs.json"
@@ -722,6 +723,709 @@ def show_structures(campaign: Campaign, how_many: int = 2, colour_by: str = "cha
 
 
 # --------------------------------------------------------------------------- #
+# 4b. antibody-format designs: VH / VL identity and loop annotation
+#
+# Everything here is derived from two files that ship with the source tree - the
+# scaffold the campaign designed on (scaffolds/scFv.cif) and the modality preset
+# that declares its paratope (settings/modality/scFv.json) - and from the design's
+# own output row. Nothing is inferred from a bare sequence: a domain is called VH
+# or VL only when its framework matches the scaffold chain, and a loop is reported
+# only when the framework anchors on both sides of it are found. Anything that
+# cannot be established that way is reported as unavailable.
+# --------------------------------------------------------------------------- #
+
+AMINO_ACID_CODES = {"ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C", "GLN": "Q",
+                    "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I", "LEU": "L", "LYS": "K",
+                    "MET": "M", "PHE": "F", "PRO": "P", "SER": "S", "THR": "T", "TRP": "W",
+                    "TYR": "Y", "VAL": "V"}
+
+# chain letter in the antibody scaffold -> variable domain it is
+ANTIBODY_DOMAINS = {"H": "VH", "L": "VL"}
+ANTIBODY_MODALITIES = ("scFv", "Fab", "VHH")
+
+# One span in a mutate_positions string: "L30-32", "H52-55(4-6)", "H72*", "L24-29!".
+_SPAN_PATTERN = re.compile(r"(?P<chain>[A-Za-z]+)(?P<start>\d+)(?:-(?P<end>\d+))?"
+                           r"(?:\((?P<lengths>[^)]+)\))?(?P<flags>(?:[+-][A-Za-z]+|[*!])*)")
+
+# How many framework residues on each side of a loop are used to locate it.
+ANCHOR_LENGTH = 6
+
+NUMBERING_CONVENTION = """\
+Loop spans are NOT inferred from the designed sequence. They are the paratope
+spans the shipped modality preset declares in `mutate_positions`, written in the
+residue numbering of the scaffold file the campaign designed on
+(`scaffolds/<modality>.cif`, chains H and L, numbered from 1), and they are
+located inside each design by exact framework anchors of up to six residues on
+each side - framework positions the preset never redesigns. A loop whose anchors
+are not both found exactly once is reported as unavailable rather than guessed.
+
+For the shipped scFv preset those spans are L24-34, L50-56, L89-97 and H26-35,
+H50-65, H95-106. L1/L2/L3 and H2 coincide with the Kabat CDR definitions; H1
+(26-35) is the Chothia-Kabat union; H95-106 begins at the conserved Cys-1 stem,
+so it carries four held stem residues (`YCAR` in the scaffold) ahead of the loop
+proper. The separately reported `HCDR3 (Kabat)` is the classical definition -
+the residues between the conserved Cys stem and the W-G-x-G motif, both located
+in the design itself - so it is the number to quote as the HCDR3 length."""
+
+
+def cif_chain_residues(path) -> dict:
+    """{chain: [(residue number, one-letter code), ...]} from an mmCIF, as text.
+
+    Reads the _atom_site loop by header name, so it does not depend on column
+    order, and needs no parser library.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    headers: list[str] = []
+    chains: dict = {}
+    in_loop = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("_atom_site."):
+            headers.append(stripped.split(".", 1)[1])
+            in_loop = True
+            continue
+        if not in_loop:
+            continue
+        if stripped.startswith(("ATOM", "HETATM")):
+            fields = stripped.split()
+            if len(fields) < len(headers):
+                continue
+            chain = number = residue = None
+            for name in ("auth_asym_id", "label_asym_id"):
+                if name in headers:
+                    chain = fields[headers.index(name)]
+                    break
+            for name in ("auth_seq_id", "label_seq_id"):
+                if name in headers:
+                    try:
+                        number = int(fields[headers.index(name)])
+                    except ValueError:
+                        number = None
+                    if number is not None:
+                        break
+            for name in ("auth_comp_id", "label_comp_id"):
+                if name in headers:
+                    residue = fields[headers.index(name)]
+                    break
+            if chain is None or number is None or residue is None:
+                continue
+            seen = chains.setdefault(chain, {})
+            seen.setdefault(number, AMINO_ACID_CODES.get(residue.upper(), "X"))
+        elif stripped and not stripped.startswith(("#", "loop_", "_", "data_")):
+            in_loop = False
+    return {chain: [(number, seen[number]) for number in sorted(seen)]
+            for chain, seen in chains.items()}
+
+
+def paratope_spans(edit_string: str) -> dict:
+    """{chain letter: [(start, end, editable), ...]} from a mutate_positions string.
+
+    `editable` is False for a span written with `!` (held unredesigned) and for a
+    span written with `*` (a framework position, not paratope at all). The `*`
+    spans are dropped: they are framework, so they belong in the anchors.
+    """
+    spans: dict = {}
+    for match in _SPAN_PATTERN.finditer(edit_string or ""):
+        flags = match.group("flags") or ""
+        if "*" in flags:
+            continue
+        start = int(match.group("start"))
+        end = int(match.group("end")) if match.group("end") else start
+        spans.setdefault(match.group("chain"), []).append(
+            (min(start, end), max(start, end), "!" not in flags))
+    return {chain: sorted(found) for chain, found in spans.items()}
+
+
+def designed_positions(edit_string: str) -> dict:
+    """{chain letter: {positions the preset redesigns}}, `*` framework included.
+
+    A position the preset may change cannot serve as an anchor, so this is what
+    the anchor builder avoids.
+    """
+    positions: dict = {}
+    for match in _SPAN_PATTERN.finditer(edit_string or ""):
+        flags = match.group("flags") or ""
+        if "!" in flags:
+            continue
+        start = int(match.group("start"))
+        end = int(match.group("end")) if match.group("end") else start
+        positions.setdefault(match.group("chain"), set()).update(
+            range(min(start, end), max(start, end) + 1))
+    return positions
+
+
+def merged_loops(spans: list) -> list:
+    """Adjacent or overlapping paratope spans joined into one loop each."""
+    loops: list = []
+    for start, end, _editable in spans:
+        if loops and start <= loops[-1][1] + 1:
+            loops[-1] = (loops[-1][0], max(loops[-1][1], end))
+        else:
+            loops.append((start, end))
+    return loops
+
+
+def scaffold_reference(modality: str = "scFv") -> dict:
+    """What a scaffolded modality's loops are, read off the preset and scaffold.
+
+    {chain letter: {"domain", "sequence", "first", "loops": [...], "anchors": ...}}
+    with one loop entry per declared paratope loop, named LCDR1..HCDR3 in the
+    order they occur. Raises RuntimeError naming the missing file, because an
+    annotation built on a guessed scaffold would be worthless.
+    """
+    preset_path = PRESETS / "modality" / f"{modality}.json"
+    try:
+        preset = json.loads(preset_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as unreadable:
+        raise RuntimeError(f"cannot read the {modality} preset at {preset_path}: "
+                           f"{unreadable}") from unreadable
+    scaffold_name = preset.get("binder_scaffold")
+    if not scaffold_name:
+        raise RuntimeError(f"the {modality} preset declares no binder_scaffold, so it has no "
+                           "framework to annotate against")
+    scaffold = SOURCE_TREE / scaffold_name if not Path(scaffold_name).is_absolute() \
+        else Path(scaffold_name)
+    if not scaffold.is_file():
+        scaffold = SCAFFOLDS / Path(scaffold_name).name
+    residues = cif_chain_residues(scaffold)
+    if not residues:
+        raise RuntimeError(f"no residues read from the {modality} scaffold {scaffold}")
+
+    spans = paratope_spans(str(preset.get("mutate_positions") or ""))
+    editable = designed_positions(str(preset.get("mutate_positions") or ""))
+    reference: dict = {}
+    for chain, numbered in residues.items():
+        if chain not in spans:
+            continue
+        numbers = [number for number, _ in numbered]
+        sequence = "".join(code for _, code in numbered)
+        at = {number: index for index, number in enumerate(numbers)}
+        domain = ANTIBODY_DOMAINS.get(chain, chain)
+        loops = []
+        for order, (start, end) in enumerate(merged_loops(spans[chain]), start=1):
+            if start not in at or end not in at:
+                continue
+            loops.append({"name": f"{domain[-1]}CDR{order}", "chain": chain,
+                          "span": f"{chain}{start}-{end}", "start": start, "end": end,
+                          "scaffold_sequence": sequence[at[start]:at[end] + 1],
+                          "editable_positions": sorted(number for number
+                                                       in editable.get(chain, set())
+                                                       if start <= number <= end)})
+        reference[chain] = {"domain": domain, "chain": chain, "sequence": sequence,
+                            "numbers": numbers, "loops": loops,
+                            "scaffold": str(scaffold),
+                            "fixed": [number for number in numbers
+                                      if number not in editable.get(chain, set())]}
+    if not reference:
+        raise RuntimeError(f"the {modality} preset names chains {sorted(spans)} but the scaffold "
+                           f"{scaffold} holds {sorted(residues)}")
+    return reference
+
+
+def _fixed_runs(reference: dict, start: int, end: int) -> list:
+    """Runs of consecutive never-redesigned residues over [start, end], in order."""
+    at = {number: index for index, number in enumerate(reference["numbers"])}
+    fixed = set(reference["fixed"])
+    runs: list[list[str]] = []
+    for number in range(start, end + 1):
+        if number in at and number in fixed:
+            if not runs or runs[-1] is None:
+                runs.append([])
+            runs[-1].append(reference["sequence"][at[number]])
+        elif runs and runs[-1] is not None:
+            runs.append(None)
+    return ["".join(run) for run in runs if run]
+
+
+def _anchor_before(reference: dict, start: int, end: int) -> str:
+    """The last ANCHOR_LENGTH framework residues immediately before a loop."""
+    runs = _fixed_runs(reference, start, end)
+    return runs[-1][-ANCHOR_LENGTH:] if runs else ""
+
+
+def _anchor_after(reference: dict, start: int, end: int) -> str:
+    """The first ANCHOR_LENGTH framework residues immediately after a loop."""
+    runs = _fixed_runs(reference, start, end)
+    return runs[0][:ANCHOR_LENGTH] if runs else ""
+
+
+def domain_anchors(reference: dict) -> list:
+    """[(before, loop, after), ...]: the framework anchors flanking each loop."""
+    numbers = reference["numbers"]
+    anchors = []
+    for index, loop in enumerate(reference["loops"]):
+        previous_end = reference["loops"][index - 1]["end"] if index else numbers[0] - 1
+        next_start = (reference["loops"][index + 1]["start"]
+                      if index + 1 < len(reference["loops"]) else numbers[-1] + 1)
+        anchors.append((_anchor_before(reference, previous_end + 1, loop["start"] - 1), loop,
+                        _anchor_after(reference, loop["end"] + 1, next_start - 1)))
+    return anchors
+
+
+def annotate_domain(sequence: str, reference: dict) -> dict:
+    """Locate a reference's loops inside one designed domain sequence.
+
+    Returns {"domain", "sequence", "length", "loops": [...], "notes": [...]}.
+    A loop whose anchors are not both found, exactly once each and in order, is
+    returned with sequence None and a reason, never with a guessed span.
+    """
+    sequence = (sequence or "").strip().upper()
+    result = {"domain": reference["domain"], "sequence": sequence, "length": len(sequence),
+              "loops": [], "notes": []}
+    cursor = 0
+    for before, loop, after in domain_anchors(reference):
+        entry = {"name": loop["name"], "scaffold_span": loop["span"],
+                 "scaffold_sequence": loop["scaffold_sequence"],
+                 "editable_positions": loop["editable_positions"],
+                 "sequence": None, "length": None, "start": None, "end": None,
+                 "unavailable": ""}
+        if not before or not after:
+            entry["unavailable"] = "the preset leaves no framework anchor on one side"
+        elif sequence.count(before) != 1 or sequence.count(after) != 1:
+            entry["unavailable"] = (f"framework anchor {before!r} appears "
+                                    f"{sequence.count(before)}x and {after!r} "
+                                    f"{sequence.count(after)}x; one each is required")
+        else:
+            opening = sequence.find(before, cursor)
+            closing = sequence.find(after, opening + len(before) if opening >= 0 else cursor)
+            if opening < 0 or closing < 0:
+                entry["unavailable"] = "framework anchors are not in the expected order"
+            else:
+                start = opening + len(before)
+                entry.update(sequence=sequence[start:closing], length=closing - start,
+                             start=start + 1, end=closing)
+                cursor = closing
+        result["loops"].append(entry)
+    located = [loop for loop in result["loops"] if loop["sequence"] is not None]
+    if len(located) != len(result["loops"]):
+        result["notes"].append(f"{len(located)} of {len(result['loops'])} loops located by "
+                               "framework anchors; the rest are reported as unavailable")
+    return result
+
+
+def kabat_hcdr3(sequence: str) -> dict:
+    """CDR-H3 by the classical definition, located in the sequence itself.
+
+    The loop runs from three residues after the conserved Cys of the `C-x-x`
+    stem to the residue before the `W-G-x-G` motif. Both anchors are found in
+    this sequence; if either is absent the result says so and carries no span.
+    """
+    sequence = (sequence or "").strip().upper()
+    motif = None
+    for match in re.finditer(r"W[GA].G", sequence):
+        motif = match
+    if motif is None:
+        return {"sequence": None, "length": None,
+                "unavailable": "no W-G-x-G framework motif in this sequence"}
+    cysteine = sequence.rfind("C", 0, motif.start())
+    if cysteine < 0:
+        return {"sequence": None, "length": None,
+                "unavailable": "no Cys stem before the W-G-x-G motif"}
+    start, end = cysteine + 3, motif.start()
+    if end <= start:
+        return {"sequence": None, "length": None,
+                "unavailable": "the Cys stem and the W-G-x-G motif leave no loop between them"}
+    return {"sequence": sequence[start:end], "length": end - start,
+            "start": start + 1, "end": end, "stem": sequence[cysteine:cysteine + 3],
+            "motif": motif.group(0), "unavailable": ""}
+
+
+def _similarity(sequence: str, reference: dict) -> int:
+    """How many of a reference's framework anchors occur in a sequence."""
+    sequence = (sequence or "").upper()
+    anchors = {text for before, _loop, after in domain_anchors(reference)
+               for text in (before, after) if text}
+    return sum(1 for text in anchors if text in sequence)
+
+
+def assign_domains(chain_sequences: list, reference: dict) -> list:
+    """Match designed binder chains to scaffold domains by their frameworks.
+
+    `chain_sequences` is the Binder_Sequence chains in output order. Each is
+    assigned to the reference domain whose framework anchors it carries most of,
+    so VH and VL are identified by evidence rather than by output order. A chain
+    that matches nothing is returned as an unidentified domain.
+    """
+    unclaimed = dict(reference)
+    assigned: list = []
+    for position, sequence in enumerate(chain_sequences):
+        best_chain, best_score = "", 0
+        for chain, entry in unclaimed.items():
+            score = _similarity(sequence, entry)
+            if score > best_score:
+                best_chain, best_score = chain, score
+        if not best_chain:
+            assigned.append({"domain": f"chain {position + 1} (unidentified)",
+                             "sequence": sequence, "length": len(sequence), "loops": [],
+                             "notes": ["no scaffold framework anchor found in this chain, so it "
+                                       "is not called VH or VL"],
+                             "chain_position": position + 1})
+            continue
+        entry = unclaimed.pop(best_chain)
+        annotated = annotate_domain(sequence, entry)
+        annotated["chain_position"] = position + 1
+        annotated["scaffold_chain"] = best_chain
+        annotated["anchors_matched"] = f"{best_score} framework anchors matched"
+        assigned.append(annotated)
+    return assigned
+
+
+def split_paratope(paratope: str, domain: dict) -> dict:
+    """Which contacting residues of one designed domain fall in a loop.
+
+    `paratope` is one chain's part of Interface_Binder_Residues, as `K58,Y59`.
+    Each label is checked against the domain sequence at that position before it
+    is used: a label that does not match is listed as unmapped rather than
+    assigned to a loop, because a silent off-by-one would mislabel the paratope.
+    """
+    sequence = domain.get("sequence") or ""
+    in_loop: dict = {}
+    framework, unmapped = [], []
+    for label in (paratope or "").split(","):
+        label = label.strip()
+        match = re.fullmatch(r"([A-Z])(\d+)", label)
+        if not match:
+            if label:
+                unmapped.append(label)
+            continue
+        code, position = match.group(1), int(match.group(2))
+        if not (1 <= position <= len(sequence)) or sequence[position - 1] != code:
+            unmapped.append(label)
+            continue
+        for loop in domain.get("loops", []):
+            if loop.get("start") and loop["start"] <= position <= loop["end"]:
+                in_loop.setdefault(loop["name"], []).append(label)
+                break
+        else:
+            framework.append(label)
+    return {"loops": in_loop, "framework": framework, "unmapped": unmapped,
+            "contacts": sum(len(found) for found in in_loop.values()) + len(framework)}
+
+
+def is_antibody_campaign(campaign: Campaign) -> str:
+    """The antibody modality a campaign ran, or "" - read, never assumed.
+
+    BindCraft2 records the modality in three independent places: the resolved
+    settings inside `campaign_metadata.json`, that file's provenance block, and a
+    `settings_modality` column on every output row. All three are consulted, so a
+    campaign whose metadata file is missing is still identified from its CSV.
+    """
+    metadata = campaign.metadata or {}
+    settings = metadata.get("settings") if isinstance(metadata.get("settings"), dict) else {}
+    provenance = metadata.get("metadata") if isinstance(metadata.get("metadata"), dict) else {}
+    sources = [settings.get("modality"), provenance.get("settings_modality"),
+               metadata.get("modality")]
+    for row in (campaign.ranked[:1] + campaign.candidates[:1]):
+        sources.append(row.get("settings_modality"))
+    for declared in sources:
+        if not declared:
+            continue
+        names = (re.split(r"[;,]", declared) if isinstance(declared, str) else list(declared))
+        for name in names:
+            if str(name).strip() in ANTIBODY_MODALITIES:
+                return str(name).strip()
+    return ""
+
+
+def top_designs(campaign: Campaign, limit: int = 10, modality: str = "") -> dict:
+    """The accepted designs, best first, with antibody annotation where possible.
+
+    {"modality", "convention", "designs": [...], "notes": [...]}. The order is the
+    order of `3_Ranked/!_Ranked.csv`, which the pipeline writes by its i_pDAE
+    ranking; this function never re-sorts and never pads the list to `limit`.
+    A campaign of another modality still gets its designs back, without loop
+    annotation, so the PD-L1 path is unaffected.
+    """
+    modality = modality or is_antibody_campaign(campaign)
+    report = {"modality": modality, "convention": NUMBERING_CONVENTION if modality else "",
+              "designs": [], "notes": []}
+    reference = {}
+    if modality:
+        try:
+            reference = scaffold_reference(modality)
+        except RuntimeError as failure:
+            report["notes"].append(f"loop annotation unavailable: {failure}")
+
+    for row in campaign.ranked[:max(0, limit)]:
+        design = (row.get("design") or "").strip()
+        chains = [chain.strip() for chain in str(row.get("Binder_Sequence") or "").split("/")
+                  if chain.strip()]
+        paratopes = [part.strip() for part in
+                     str(row.get("Interface_Binder_Residues") or "").split("/")]
+        files = [path for path in campaign.structures
+                 if path.stem == design or path.stem.startswith(design + "_")]
+        entry = {"rank": row.get("rank", ""), "design": design,
+                 "structure": files[0].name if files else "",
+                 "structure_path": str(files[0]) if files else "",
+                 "chain_count": len(chains),
+                 "confidence": {key: row[key] for key in CONFIDENCE_COLUMNS
+                                if key in row and str(row[key]).strip()},
+                 "interface": {key: row[key] for key in INTERFACE_COLUMNS
+                               if key in row and str(row[key]).strip()},
+                 "target_residues": (row.get("Interface_Target_Residues") or "").strip(),
+                 "domains": [], "hcdr3": {}}
+        if reference:
+            entry["domains"] = assign_domains(chains, reference)
+            for position, domain in enumerate(entry["domains"]):
+                domain["paratope"] = split_paratope(
+                    paratopes[position] if position < len(paratopes) else "", domain)
+                if domain.get("domain") == "VH":
+                    entry["hcdr3"] = kabat_hcdr3(domain.get("sequence") or "")
+        else:
+            entry["domains"] = [{"domain": f"chain {position + 1}", "sequence": sequence,
+                                 "length": len(sequence), "loops": [],
+                                 "paratope": {"loops": {}, "framework": [], "unmapped": [],
+                                              "contacts": 0},
+                                 "chain_position": position + 1, "notes": []}
+                                for position, sequence in enumerate(chains)]
+        report["designs"].append(entry)
+
+    if len(report["designs"]) < limit:
+        report["notes"].append(f"{len(report['designs'])} accepted design(s) available; "
+                               f"{limit} were asked for. Nothing was substituted to reach "
+                               f"{limit}: a rejected candidate is not a candidate.")
+    return report
+
+
+def domain_fasta(campaign: Campaign, limit: int = 10, modality: str = "") -> str:
+    """FASTA of the accepted designs with each variable domain named as a domain.
+
+    One record per chain, headed `<design>_VH` / `<design>_VL` where the chain's
+    framework identified it, so the PI can tell which sequence is which without
+    counting chains. Falls back to `binder_fasta`'s chain numbering otherwise.
+    """
+    report = top_designs(campaign, limit=limit, modality=modality)
+    records = []
+    for entry in report["designs"]:
+        notes = " ".join(f"{key}={entry['confidence'][key]}"
+                         for key in ("i_pDAE", "i_pTM", "i_pAE", "pLDDT")
+                         if key in entry["confidence"])
+        for domain in entry["domains"]:
+            sequence = domain.get("sequence") or ""
+            if not sequence:
+                continue
+            label = domain.get("domain", "")
+            suffix = label if label in ("VH", "VL") else f"chain{domain.get('chain_position', 1)}"
+            header = f">{entry['design']}_{suffix} rank={entry['rank']}"
+            records.append(f"{header} {notes}".rstrip() + "\n" + sequence)
+    return "\n".join(records) + ("\n" if records else "")
+
+
+CDR_TABLE_COLUMNS = ["rank", "design", "domain", "loop", "scaffold_span", "sequence", "length",
+                     "contacting_residues", "unavailable"]
+
+
+def cdr_table(campaign: Campaign, limit: int = 10, modality: str = "") -> tuple:
+    """(columns, rows) of every located loop of the accepted designs.
+
+    One row per loop per domain. A loop that could not be located keeps its row,
+    with an empty sequence and the reason in `unavailable`, so the table never
+    silently drops a loop.
+    """
+    report = top_designs(campaign, limit=limit, modality=modality)
+    rows = []
+    for entry in report["designs"]:
+        for domain in entry["domains"]:
+            contacts = (domain.get("paratope") or {}).get("loops", {})
+            for loop in domain.get("loops", []):
+                rows.append({"rank": entry["rank"], "design": entry["design"],
+                             "domain": domain.get("domain", ""), "loop": loop["name"],
+                             "scaffold_span": loop["scaffold_span"],
+                             "sequence": loop["sequence"] or "",
+                             "length": "" if loop["length"] is None else loop["length"],
+                             "contacting_residues": ",".join(contacts.get(loop["name"], [])),
+                             "unavailable": loop["unavailable"]})
+            if domain.get("domain") == "VH" and entry.get("hcdr3"):
+                hcdr3 = entry["hcdr3"]
+                rows.append({"rank": entry["rank"], "design": entry["design"],
+                             "domain": "VH", "loop": "HCDR3 (Kabat)",
+                             "scaffold_span": "located in the design (C-x-x .. W-G-x-G)",
+                             "sequence": hcdr3.get("sequence") or "",
+                             "length": "" if hcdr3.get("length") is None else hcdr3["length"],
+                             "contacting_residues": "",
+                             "unavailable": hcdr3.get("unavailable", "")})
+    return CDR_TABLE_COLUMNS, rows
+
+
+def cdr_table_view(campaign: Campaign, limit: int = 10, modality: str = ""):
+    columns, rows = cdr_table(campaign, limit=limit, modality=modality)
+    return as_frame(columns, rows, columns)
+
+
+def accepted_designs(campaign: Campaign, limit: int = 10) -> list:
+    """[{rank, design, path, label}] for the accepted designs that have a file.
+
+    In ranked order, one entry per accepted design, never the same file twice.
+    This is what populates the individual 3D viewer, so a campaign with three
+    accepted designs offers exactly three.
+    """
+    entries, used = [], set()
+    for row in campaign.ranked[:max(0, limit)]:
+        design = (row.get("design") or "").strip()
+        for path in campaign.structures:
+            if path in used:
+                continue
+            if path.stem == design or path.stem.startswith(design + "_"):
+                rank = str(row.get("rank", "") or len(entries) + 1)
+                entries.append({"rank": rank, "design": design, "path": path,
+                                "label": f"rank {rank} - {design or path.stem}"})
+                used.add(path)
+                break
+    return entries
+
+
+def structure_domains(path, reference: dict | None = None) -> list:
+    """[{chain, length, domain}] for one complex file, naming VH/VL where provable.
+
+    A chain is called VH or VL only when it carries the scaffold framework
+    anchors for that domain; everything else is reported as "target / other",
+    which is what the PD-L1 complexes get.
+    """
+    labelled = []
+    for chain, numbered in cif_chain_residues(path).items():
+        sequence = "".join(code for _, code in numbered)
+        domain = "target / other"
+        if reference:
+            best, score = "", 0
+            for letter, entry in reference.items():
+                matched = _similarity(sequence, entry)
+                if matched > score:
+                    best, score = entry["domain"], matched
+            if best:
+                domain = best
+        labelled.append({"chain": chain, "length": len(numbered), "domain": domain})
+    return labelled
+
+
+CHAIN_PALETTE = ["#3c5b6f", "#B76E79", "#8FA98F", "#C9A227"]
+
+
+def show_structure(campaign: Campaign, index: int = 0, colour_by: str = "chain",
+                   modality: str = "", highlight: str = "none"):
+    """One accepted complex in py3Dmol, chosen by position in the ranked order.
+
+    Returns (view, entry, chains) where `entry` is the `accepted_designs` record
+    and `chains` the `structure_domains` labelling. `highlight` may be "none",
+    "HCDR3" or "epitope"; a highlight that cannot be established from the
+    recorded metadata is skipped and reported in the returned chain list rather
+    than drawn in the wrong place.
+    """
+    entries = accepted_designs(campaign, limit=10)
+    if not entries:
+        raise RuntimeError(f"no accepted complex files in {campaign.folder / '3_Ranked'}")
+    try:
+        import py3Dmol
+    except ImportError as missing:
+        raise RuntimeError(
+            "py3Dmol is not importable in this kernel. Install it in the bindcraft2 environment "
+            "(python -m pip install py3Dmol) or download the .cif files and open them locally."
+        ) from missing
+
+    entry = entries[max(0, min(int(index), len(entries) - 1))]
+    modality = modality or is_antibody_campaign(campaign)
+    reference = {}
+    if modality:
+        try:
+            reference = scaffold_reference(modality)
+        except RuntimeError:
+            reference = {}
+    chains = structure_domains(entry["path"], reference or None)
+
+    view = py3Dmol.view(width=720, height=520)
+    view.addModel(entry["path"].read_text(encoding="utf-8", errors="replace"), "cif")
+    if colour_by == "pLDDT":
+        # BC2 writes per-residue pLDDT on a 0-100 scale into the B-factor column.
+        view.setStyle({}, {"cartoon": {"colorscheme": {"prop": "b", "gradient": "roygb",
+                                                       "min": 50, "max": 90}}})
+    else:
+        for number, chain in enumerate(chains or [{"chain": "A"}]):
+            view.setStyle({"chain": chain["chain"]},
+                          {"cartoon": {"color": CHAIN_PALETTE[number % len(CHAIN_PALETTE)]}})
+
+    if highlight and highlight != "none":
+        drawn = _highlight_residues(view, campaign, entry, chains, reference, highlight)
+        for chain in chains:
+            chain["highlight"] = drawn
+    view.zoomTo()
+    view.setBackgroundColor("white")
+    return view, entry, chains
+
+
+def _highlight_residues(view, campaign: Campaign, entry: dict, chains: list,
+                        reference: dict, highlight: str) -> str:
+    """Draw sticks on the HCDR3 or the contacted target residues; say what happened."""
+    row = next((item for item in campaign.ranked
+                if (item.get("design") or "").strip() == entry["design"]), {})
+    if highlight == "epitope":
+        labels = [(match.group(1), int(match.group(2))) for match in
+                  re.finditer(r"([A-Z])(\d+)", row.get("Interface_Target_Residues") or "")]
+        targets = [chain["chain"] for chain in chains if chain["domain"] == "target / other"]
+        if not labels or not targets:
+            return "epitope highlight skipped: no recorded contacted target residues"
+        # Each recorded label carries its residue letter. Only labels that match the
+        # structure at that number are drawn, so a numbering difference between the
+        # table and the file shows up as a count rather than as sticks in the wrong place.
+        residues_by_chain = cif_chain_residues(entry["path"])
+        drawn, mismatched = [], []
+        for letter in targets:
+            present = dict(residues_by_chain.get(letter, []))
+            for code, number in labels:
+                if present.get(number) == code:
+                    drawn.append((letter, number))
+                else:
+                    mismatched.append(f"{code}{number}")
+        if not drawn:
+            return (f"epitope highlight skipped: none of {len(labels)} recorded target residue(s) "
+                    "matches the target chain in this structure file by residue and number")
+        for letter in targets:
+            numbers = [number for chain, number in drawn if chain == letter]
+            if numbers:
+                view.addStyle({"chain": letter, "resi": numbers},
+                              {"stick": {"colorscheme": "yellowCarbon", "radius": 0.2}})
+        return (f"{len(drawn)} contacted target residue(s) shown as sticks"
+                + (f"; {len(set(mismatched))} recorded residue(s) did not match the file and "
+                   "were not drawn" if mismatched else ""))
+
+    if highlight == "HCDR3":
+        if not reference:
+            return "HCDR3 highlight skipped: no scaffold reference for this campaign"
+        sequences = [part.strip() for part in
+                     str(row.get("Binder_Sequence") or "").split("/") if part.strip()]
+        heavy = next((domain for domain in assign_domains(sequences, reference)
+                      if domain.get("domain") == "VH"), None)
+        if heavy is None:
+            return "HCDR3 highlight skipped: no chain identified as VH"
+        located = kabat_hcdr3(heavy.get("sequence") or "")
+        if not located.get("sequence"):
+            return f"HCDR3 highlight skipped: {located.get('unavailable', 'not located')}"
+        letter = next((chain["chain"] for chain in chains if chain["domain"] == "VH"), "")
+        if not letter:
+            return "HCDR3 highlight skipped: the VH chain is not identifiable in the structure"
+        # The located span counts positions along the sequence. Drawing it needs the
+        # structure to number that chain the same way, so that is checked rather
+        # than assumed: a highlight on the wrong residues would be worse than none.
+        numbered = cif_chain_residues(entry["path"]).get(letter, [])
+        structure_numbers = [number for number, _ in numbered]
+        structure_sequence = "".join(code for _, code in numbered)
+        if structure_sequence != (heavy.get("sequence") or ""):
+            return ("HCDR3 highlight skipped: the VH chain in the structure file does not "
+                    "match the VH sequence in the ranked table")
+        if structure_numbers != list(range(1, len(structure_numbers) + 1)):
+            return (f"HCDR3 highlight skipped: chain {letter} is numbered "
+                    f"{structure_numbers[0]}-{structure_numbers[-1]}, not from 1, so the "
+                    "located span cannot be mapped onto it safely")
+        view.addStyle({"chain": letter,
+                       "resi": list(range(located["start"], located["end"] + 1))},
+                      {"stick": {"colorscheme": "magentaCarbon", "radius": 0.2}})
+        return (f"HCDR3 {located['sequence']} ({located['length']} aa) shown as sticks on "
+                f"chain {letter}, residues {located['start']}-{located['end']}")
+    return f"unknown highlight {highlight!r}"
+
+
+# --------------------------------------------------------------------------- #
 # 5. export and validation
 # --------------------------------------------------------------------------- #
 
@@ -742,6 +1446,27 @@ def export_campaign(campaign: Campaign, destination: Path | None = None, limit: 
         # FASTA goes to Linux tools: write LF regardless of the host platform.
         target.write_text(fasta, encoding="utf-8", newline="\n")
         written.append(target.name)
+
+    # Antibody-format campaigns additionally get a chain-named FASTA and the loop
+    # table. Both are skipped silently for a de novo binder campaign, so the
+    # PD-L1 export is byte-for-byte what it was.
+    if is_antibody_campaign(campaign):
+        domains = domain_fasta(campaign, limit=limit)
+        if domains:
+            target = folder / f"{campaign.folder.name}_VH_VL.fasta"
+            target.write_text(domains, encoding="utf-8", newline="\n")
+            written.append(target.name)
+        columns, rows = cdr_table(campaign, limit=limit)
+        if rows:
+            target = folder / f"{campaign.folder.name}_CDRs.csv"
+            with target.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=columns)
+                writer.writeheader()
+                writer.writerows(rows)
+            written.append(target.name)
+            note = folder / f"{campaign.folder.name}_CDR_numbering.txt"
+            note.write_text(NUMBERING_CONVENTION + "\n", encoding="utf-8", newline="\n")
+            written.append(note.name)
 
     for relative in ("3_Ranked/!_Ranked.csv", "2_Refolded/!_Refolded.csv",
                      "1_Trajectories/!_Trajectories.csv", "summary.csv"):

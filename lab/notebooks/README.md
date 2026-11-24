@@ -34,9 +34,9 @@ jupyter lab            # or the institutional Jupyter/Workbench launcher
 4. submit to SLURM, with an optional account, the parameter directory, and a dry-run switch.
 5. job status (`squeue`, then `sacct`), log tail, cancel.
 6. load any campaign - finished or still running - and read the ranked, candidate and attempt tables, with the filters that rejected candidates.
-7. per accepted design: sequence, confidence readings, interface readings, and the structure files that belong to it.
-8. 3D view of the predicted complexes with `py3Dmol`, coloured by chain or pLDDT.
-9. export: binder FASTA, the CSVs, `campaign_metadata.json`, the accepted `.cif` complexes, and a zip.
+7. up to ten **accepted** candidates, best first, in the pipeline's own `i_pDAE` order: sequence, confidence readings, interface readings, contacted target residues and the structure file for each. For an antibody-format campaign (`scFv`, `Fab`, `VHH`) each design also gets its VH and VL named from the scaffold framework, its loops annotated with the convention they were read with, and its Kabat HCDR3. Fewer than ten are shown when fewer passed; nothing is substituted. The rejected candidates and their `failed_filters` stay underneath.
+8. 3D review, **one complex at a time by default**: a dropdown of the accepted designs that actually have a file, labelled by rank and ID, with Previous/Next, `colour by chain` or `colour by pLDDT`, an optional HCDR3 or epitope highlight, and the rank, ID, filename and metrics beside the viewer. Compare View still draws up to 10 complexes in a grid. Needs `py3Dmol`.
+9. export: binder FASTA, the CSVs, `campaign_metadata.json`, the accepted `.cif` complexes, and a zip - plus, for an antibody-format campaign, a VH/VL FASTA, the annotated loop table and the numbering record.
 10. audit: runs `lab/scripts/validate_outputs.py` for the PASS/FAIL/BLOCKED/NOT TESTED report and the Level A / Level B verdicts.
 
 ## Deliberate omissions
@@ -52,6 +52,17 @@ jupyter lab            # or the institutional Jupyter/Workbench launcher
 (90 assertions over both the pandas and the no-pandas table paths; all 10 code cells executed and
 every widget callback fired, including a dry-run submission, a campaign load, an export with zip,
 and a validator run). `nbformat` validates the notebook.
+
+The scFv layer behind cells 7-9 has its own two runnable test scripts, both passing:
+
+```bash
+python lab/scripts/test_scfv_annotation.py   # 127 assertions, 10 tests
+python lab/scripts/test_notebook_cells.py    # cells 7-9 and every callback, 4 fixture campaigns
+```
+
+They cover a campaign with a design whose structure file is missing, a de novo binder campaign
+(to prove the PD-L1 path is unaffected), a campaign with nothing accepted, and no campaign
+loaded at all, plus every path where annotation refuses to guess.
 
 **Not tested:** anything that needs the cluster - a real `sbatch`, `squeue`/`sacct` output, an H200
 allocation, a real campaign, or `py3Dmol` rendering inside institutional Jupyter. No GPU run is
